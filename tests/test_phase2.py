@@ -92,19 +92,20 @@ class TestGenerativeLoss:
         assert loss.item() >= 0.0
 
     def test_ignores_minus_100_padding(self):
-        """Loss with all -100 labels should behave differently from valid labels."""
+        """Padding positions (-100) must not contribute to the loss."""
         fn = GenerativeLoss(label_smoothing=0.0)
-        logits = _make_logits()
-        valid_labels = _make_labels(pad_last=0)
-        pad_labels   = torch.full((B, T), -100, dtype=torch.long)
+        # Perfect prediction for the first T//2 tokens; rest are padding
+        labels = torch.randint(0, V, (B, T))
+        labels[:, T // 2:] = -100                   # last half is padding
 
-        loss_valid = fn(logits, valid_labels).item()
-        # All-pad: CrossEntropyLoss with ignore_index returns 0 when every
-        # element is masked, so the two losses should differ.
-        # We just verify no crash occurs.
-        loss_pad = fn(logits, pad_labels)
-        # The two losses are different (or both valid scalars)
-        assert loss_valid != pytest.approx(loss_pad.item(), abs=1e-3) or True
+        logits = torch.full((B, T, V), -10.0)
+        for b in range(B):
+            for t in range(T // 2):
+                logits[b, t, labels[b, t]] = 100.0  # correct for non-pad
+
+        # Loss should be very low: correct on non-pad positions, pad ignored
+        loss = fn(logits, labels)
+        assert loss.item() < 0.01
 
     def test_partial_padding_differs_from_no_padding(self):
         """Partial padding changes the effective loss."""
