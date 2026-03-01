@@ -1,0 +1,26 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MISM — GAZETA_2STAGE configuration
+# Starts from rut5_base_sum_gazeta (already fine-tuned on news summarisation).
+# Inherits all defaults from base.yaml; only differences are listed here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+model:
+  model_name: "IlyaGusev/rut5_base_sum_gazeta"
+
+training:
+  stage1_epochs:   5
+  stage1_lr:       1.0e-4
+  stage2_epochs:   15
+  stage2_lr:       5.0e-5
+  batch_size:      4
+  grad_accum_steps: 8
+  bf16:            true
+  gradient_checkpointing: true
+  seed:            42
+
+logging:
+  wandb_project:  "mism-summarization"
+  wandb_run_name: "gazeta_2stage"
+
+output:
+  checkpoint_dir: "checkpoints/gazeta_2stage"
