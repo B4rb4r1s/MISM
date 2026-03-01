@@ -118,6 +118,10 @@ class KeywordsEncoder(nn.Module):
             kw_embs, kw_embs, kw_embs,
             key_padding_mask=pad_mask,
         )
+        # Guard: when *all* keywords are padding the attention softmax produces
+        # NaN (softmax of all -inf).  Replace NaN with 0 so the residual path
+        # simply passes through the original kw_embs unchanged.
+        attended = torch.nan_to_num(attended, nan=0.0)
         kw_embs = self.norm1(kw_embs + self.dropout(attended))   # [B, K, D]
 
         # ── 4. FFN ────────────────────────────────────────────────────
