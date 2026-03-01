@@ -505,14 +505,24 @@ class TestMISMTrainer:
         assert len(decoder_trainable) > 0, "Decoder must be trainable in stage 2"
 
     def test_setup_stage2_keeps_encoders_frozen(self):
+        """T5 encoder attention/FFN weights must stay frozen in stage 2.
+
+        The shared embedding weight (embed_tokens) is excluded from this
+        check: it is tied to the decoder and becomes trainable when the
+        decoder is unfrozen — that is the expected behaviour.
+        """
         trainer = self._make_trainer()
         trainer.setup_stage(2)
         raw = trainer._unwrap()
 
-        for p in raw.document_encoder.t5_encoder.parameters():
-            assert not p.requires_grad, "doc T5 encoder must stay frozen in stage 2"
-        for p in raw.keywords_encoder.t5_encoder.parameters():
-            assert not p.requires_grad, "kw T5 encoder must stay frozen in stage 2"
+        for name, p in raw.document_encoder.t5_encoder.named_parameters():
+            if "embed_tokens" not in name:
+                assert not p.requires_grad, \
+                    f"doc_encoder.{name} must stay frozen in stage 2"
+        for name, p in raw.keywords_encoder.t5_encoder.named_parameters():
+            if "embed_tokens" not in name:
+                assert not p.requires_grad, \
+                    f"kw_encoder.{name} must stay frozen in stage 2"
 
     def test_fewer_trainable_params_in_stage1_than_stage2(self):
         trainer = self._make_trainer()
