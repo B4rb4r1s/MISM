@@ -1,0 +1,10 @@
+__pycache__
+.pytest_cache
+.mism
+
+*.db
+*.json
+
+dataset
+documentation
+support_scripts
