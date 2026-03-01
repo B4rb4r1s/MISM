@@ -204,7 +204,7 @@ class SlidingWindowProcessor:
         windows_masks: List[List[int]] = []
 
         start = 0
-        while start < n:
+        while True:
             end = start + self.window_size
             ids_chunk = input_ids[start:end]
             mask_chunk = attention_mask[start:end]
@@ -218,19 +218,40 @@ class SlidingWindowProcessor:
             windows_ids.append(ids_chunk)
             windows_masks.append(mask_chunk)
 
+            # Stop if we've hit the max_windows cap
             if self.max_windows and len(windows_ids) >= self.max_windows:
                 break
-            start += self.stride
+
+            # Advance to the next starting position
+            next_start = start + self.stride
+
+            # Stop when the next window would contain NO novel tokens beyond
+            # the overlap region (i.e. next_start + overlap >= n).
+            # This prevents near-empty trailing windows when the input length
+            # is exactly (or just above) a multiple of window_size.
+            if next_start + self.overlap >= n:
+                break
+
+            start = next_start
 
         return windows_ids, windows_masks
 
     def num_windows(self, num_tokens: int) -> int:
-        """Return the expected number of windows for *num_tokens* tokens."""
+        """Return the expected number of windows for *num_tokens* tokens.
+
+        Matches the stopping criterion of :meth:`create_windows`:
+        at least one window is always created; additional windows are created
+        while ``next_start + overlap < n``.
+        """
         if num_tokens <= 0:
             return 0
-        if num_tokens <= self.window_size:
-            return 1
-        n = 1 + (num_tokens - self.window_size + self.stride - 1) // self.stride
+        # Number of additional windows beyond the first:
+        #   k-th additional window starts at k*stride;
+        #   it is created while k*stride + overlap < n
+        #   → k < (n - overlap) / stride
+        #   → k_max = floor((n - overlap - 1) / stride)  (largest valid k)
+        n_additional = max(0, (num_tokens - self.overlap - 1) // self.stride)
+        total = 1 + n_additional
         if self.max_windows:
-            n = min(n, self.max_windows)
-        return n
+            total = min(total, self.max_windows)
+        return total

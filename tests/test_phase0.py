@@ -441,12 +441,25 @@ class TestDataCollatorForSummarization:
     # ── Correctness ────────────────────────────────────────────────────
 
     def test_labels_padding_is_minus_100(self):
-        """Padding positions in labels should be -100, not pad_token_id."""
-        batch = [self.ds[0]]
-        out = self.collator(batch)
+        """Padding positions in labels should be -100, not pad_token_id.
+
+        We construct a deliberately short summary (≈ 5 tokens) so that the
+        64-token label tensor is mostly padding → at least some -100 values.
+        """
+        short_item = {
+            "doc_id": "x",
+            "title": "",
+            "text_clean": "Тест.",
+            "keywords": ["нейросети"],
+            "kw_scores": [1.0],
+            "summary": "Краткий вывод.",   # ~5 tokens, well under max_summary_tokens=64
+        }
+        out = self.collator([short_item])
         labels = out["labels"]
-        # At least some positions should be -100 (padding)
-        assert (labels == -100).any(), "Expected -100 padding in labels"
+        assert (labels == -100).any(), (
+            "Expected -100 padding in labels for a short summary, "
+            f"but got labels={labels}"
+        )
 
     def test_kw_mask_true_for_real_keywords(self):
         """kw_mask should be True for real keywords and False for pad slots."""
