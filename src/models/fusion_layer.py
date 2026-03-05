@@ -134,6 +134,7 @@ class FusionLayer(nn.Module):
             doc_seq, doc_seq, doc_seq,
             key_padding_mask=doc_pad,
         )
+        sa_out = torch.nan_to_num(sa_out, nan=0.0)  # guard: all-pad row → NaN in softmax
         doc_ctx = self.doc_norm_sa(doc_seq + self.dropout(sa_out))  # [B, L, D]
 
         # ── 3a. Cross-attention: Doc → KW ─────────────────────────────
@@ -145,6 +146,7 @@ class FusionLayer(nn.Module):
             value=kw_embeddings,
             key_padding_mask=kw_pad,
         )
+        doc_enh = torch.nan_to_num(doc_enh, nan=0.0)  # guard: all-pad kw → NaN
         doc_enhanced = self.doc_norm_ca(doc_ctx + self.dropout(doc_enh))  # [B, L, D]
 
         # ── 3b. Cross-attention: KW → Doc ─────────────────────────────
@@ -156,6 +158,7 @@ class FusionLayer(nn.Module):
             value=doc_ctx,
             key_padding_mask=doc_pad,
         )
+        kw_enh = torch.nan_to_num(kw_enh, nan=0.0)  # guard: all-pad doc → NaN
         kw_enhanced = self.kw_norm_ca(kw_embeddings + self.dropout(kw_enh))  # [B, K, D]
 
         # ── 4. Gated fusion (document) ────────────────────────────────
