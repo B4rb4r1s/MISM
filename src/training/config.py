@@ -71,6 +71,7 @@ class MISMConfig:
     wandb_project:        str   = "mism-summarization"
     wandb_run_name:       Optional[str] = None
     use_wandb:            bool  = True
+    use_tensorboard:      bool  = True
     log_every_steps:      int   = 50
     eval_every_steps:     int   = 500
     save_every_steps:     int   = 1000

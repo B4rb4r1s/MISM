@@ -19,8 +19,9 @@ training:
   seed:            42
 
 logging:
-  wandb_project:  "mism-summarization"
-  wandb_run_name: "gazeta_2stage"
+  wandb_project:   "mism-summarization"
+  wandb_run_name:  "gazeta_2stage"
+  use_tensorboard: true
 
 output:
   checkpoint_dir: "checkpoints/gazeta_2stage"

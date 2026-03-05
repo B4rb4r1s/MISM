@@ -16,11 +16,22 @@ Stage 2 (stage2_epochs):
 Both stages use cosine LR with linear warmup, AdamW with weight_decay,
 optional bf16 autocast, and gradient accumulation.
 
-DDP
-───
-Wrap the trainer in `torchrun --nproc_per_node=N` and provide
-local_rank / world_size from env-vars.  The trainer handles
-DistributedDataParallel wrapping and DistributedSampler internally.
+Logged per optimiser step
+─────────────────────────
+train/total       — composite loss
+train/l_gen       — generative (CE) component
+train/l_cover     — keyword coverage component
+train/l_bert      — soft BERTScore component
+train/l_gate      — gate hinge component
+train/grad_norm   — gradient norm *before* clipping (diagnostic)
+train/lr          — current learning rate
+train/gate_fusion — mean Fusion gate value (tracks keyword usage)
+train/gate_kal    — mean KAL gate value
+
+NaN / Inf detection
+────────────────────
+If the total loss becomes non-finite, an emergency checkpoint is saved
+immediately and a RuntimeError is raised.
 """
 
 from __future__ import annotations
@@ -29,7 +40,7 @@ import logging
 import os
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -42,16 +53,10 @@ from src.losses.composite_loss import CompositeLoss
 from src.models.dual_encoder_summarizer import DualEncoderSummarizer
 from src.training.checkpoint import load_checkpoint, save_checkpoint
 from src.training.config import MISMConfig
+from src.training.logger import MetricsLogger
 from src.training.scheduler import build_scheduler
 
 logger = logging.getLogger(__name__)
-
-# Optional W&B
-try:
-    import wandb
-    _WANDB_AVAILABLE = True
-except ImportError:
-    _WANDB_AVAILABLE = False
 
 
 class MISMTrainer:
@@ -127,15 +132,17 @@ class MISMTrainer:
         else:
             self.model = model
 
-        # ── W&B init (main process only) ──────────────────────────────
-        self._wandb_run = None
-        if self.is_main and config.use_wandb and _WANDB_AVAILABLE:
-            self._wandb_run = wandb.init(
-                project=config.wandb_project,
-                name=config.wandb_run_name,
-                config=config.to_dict(),
-                resume="allow",
-            )
+        # ── Metrics logger (main process only) ────────────────────────
+        log_dir = Path(config.checkpoint_dir) / "logs"
+        self.metrics_logger = MetricsLogger(
+            log_dir=log_dir,
+            config_dict=config.to_dict(),
+            use_wandb=config.use_wandb,
+            use_tensorboard=config.use_tensorboard,
+            wandb_project=config.wandb_project,
+            wandb_run_name=config.wandb_run_name,
+            is_main_process=self.is_main,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -155,12 +162,12 @@ class MISMTrainer:
         if stage == 1:
             raw.freeze_encoders()
             raw.freeze_decoder()
-            lr = self.config.stage1_lr
+            lr     = self.config.stage1_lr
             epochs = self.config.stage1_epochs
         elif stage == 2:
             raw.freeze_encoders()
             raw.unfreeze_decoder()
-            lr = self.config.stage2_lr
+            lr     = self.config.stage2_lr
             epochs = self.config.stage2_epochs
         else:
             raise ValueError(f"stage must be 1 or 2, got {stage}")
@@ -203,26 +210,42 @@ class MISMTrainer:
         -------
         Dict with 'best_val_loss' and 'global_step'.
         """
-        # ── Stage 1 ───────────────────────────────────────────────────
-        logger.info("═══ STAGE 1  (%d epochs) ═══", self.config.stage1_epochs)
-        self.setup_stage(1)
-        for epoch in range(self.config.stage1_epochs):
-            train_metrics = self.train_epoch(epoch)
-            val_metrics   = self.evaluate()
-            self._maybe_save(epoch, val_metrics)
-            self._log({**{"train/" + k: v for k, v in train_metrics.items()},
-                       **val_metrics}, self.global_step)
+        try:
+            # ── Stage 1 ───────────────────────────────────────────────
+            logger.info("═══ STAGE 1  (%d epochs) ═══", self.config.stage1_epochs)
+            self.setup_stage(1)
+            for epoch in range(self.config.stage1_epochs):
+                train_metrics = self.train_epoch(epoch)
+                val_metrics   = self.evaluate()
+                self._maybe_save(epoch, val_metrics)
+                # Epoch summary log
+                self.metrics_logger.log(
+                    {**{"epoch_train/" + k: v for k, v in train_metrics.items()},
+                     **val_metrics,
+                     "epoch": float(epoch),
+                     "stage": 1.0},
+                    step=self.global_step,
+                )
 
-        # ── Stage 2 ───────────────────────────────────────────────────
-        logger.info("═══ STAGE 2  (%d epochs) ═══", self.config.stage2_epochs)
-        self.setup_stage(2)
-        start_epoch = self.config.stage1_epochs
-        for epoch in range(self.config.stage2_epochs):
-            train_metrics = self.train_epoch(start_epoch + epoch)
-            val_metrics   = self.evaluate()
-            self._maybe_save(start_epoch + epoch, val_metrics)
-            self._log({**{"train/" + k: v for k, v in train_metrics.items()},
-                       **val_metrics}, self.global_step)
+            # ── Stage 2 ───────────────────────────────────────────────
+            logger.info("═══ STAGE 2  (%d epochs) ═══", self.config.stage2_epochs)
+            self.setup_stage(2)
+            start_epoch = self.config.stage1_epochs
+            for epoch in range(self.config.stage2_epochs):
+                train_metrics = self.train_epoch(start_epoch + epoch)
+                val_metrics   = self.evaluate()
+                self._maybe_save(start_epoch + epoch, val_metrics)
+                self.metrics_logger.log(
+                    {**{"epoch_train/" + k: v for k, v in train_metrics.items()},
+                     **val_metrics,
+                     "epoch": float(start_epoch + epoch),
+                     "stage": 2.0},
+                    step=self.global_step,
+                )
+
+        finally:
+            # Always close logger — even on error / KeyboardInterrupt
+            self.metrics_logger.close()
 
         return {
             "best_val_loss": self.best_val_loss,
@@ -238,7 +261,7 @@ class MISMTrainer:
 
         Returns
         -------
-        Dict of averaged training loss components for this epoch.
+        Dict of averaged training metrics for this epoch.
         """
         self.model.train()
 
@@ -250,6 +273,8 @@ class MISMTrainer:
 
         accum:    Dict[str, float] = defaultdict(float)
         n_updates = 0
+        latest_grad_norm = 0.0     # captures the most-recent pre-clip norm
+        latest_lr        = 0.0
 
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
         amp_dtype   = torch.bfloat16 if (self.config.bf16 and device_type == "cuda") else None
@@ -282,31 +307,62 @@ class MISMTrainer:
                     kal_gate_values=output.kal_gate_values,
                 )
 
+            # ── NaN / Inf guard ───────────────────────────────────────
+            if not total_loss.isfinite():
+                logger.error(
+                    "Non-finite loss (%.6g) at step %d epoch %d batch %d — "
+                    "saving emergency checkpoint",
+                    total_loss.item(), self.global_step, epoch, batch_idx,
+                )
+                if self.is_main:
+                    self.save(
+                        Path(self.config.checkpoint_dir) / "emergency.pt",
+                        epoch=epoch, metrics={},
+                    )
+                raise RuntimeError(
+                    f"Non-finite loss: {total_loss.item():.6g} "
+                    f"at step {self.global_step}"
+                )
+
             # ── Scaled backward ───────────────────────────────────────
             scaled = total_loss / self.config.grad_accum_steps
             scaled.backward()
 
+            # Accumulate loss and gate stats (per micro-step)
             for k, v in components.items():
-                accum[k]       += v
-            accum["total"]     += total_loss.item()
+                accum[k] += v
+            accum["total"]      += total_loss.item()
+            accum["gate_fusion"] += output.fusion_gate_values.detach().mean().item()
+            accum["gate_kal"]    += output.kal_gate_values.detach().mean().item()
 
             # ── Optimiser step (every grad_accum_steps micro-steps) ───
             if (batch_idx + 1) % self.config.grad_accum_steps == 0:
                 trainable_params = [p for p in self.model.parameters()
                                     if p.requires_grad]
-                nn.utils.clip_grad_norm_(
+                # clip_grad_norm_ returns the norm *before* clipping
+                raw_norm = nn.utils.clip_grad_norm_(
                     trainable_params, self.config.max_grad_norm,
                 )
+                latest_grad_norm = (
+                    raw_norm.item() if hasattr(raw_norm, "item") else float(raw_norm)
+                )
+
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.global_step += 1
                 n_updates        += 1
+                latest_lr = self.optimizer.param_groups[0]["lr"]
 
                 if self.is_main and self.global_step % self.config.log_every_steps == 0:
-                    step_avg = {k: v / n_updates for k, v in accum.items()}
-                    self._log({"train/" + k: v for k, v in step_avg.items()},
-                              self.global_step)
+                    denom     = max(1, n_updates)
+                    step_metrics: Dict[str, float] = {
+                        "train/" + k: v / denom for k, v in accum.items()
+                    }
+                    # Non-averaged diagnostics
+                    step_metrics["train/grad_norm"] = latest_grad_norm
+                    step_metrics["train/lr"]        = latest_lr
+                    self.metrics_logger.log(step_metrics, step=self.global_step)
 
         denom = max(1, n_updates)
         return {k: v / denom for k, v in accum.items()}
@@ -317,14 +373,14 @@ class MISMTrainer:
 
         Returns
         -------
-        Dict with 'val/loss' (and component losses) or {} if no val data.
+        Dict with val/* metrics (loss + gate stats) or {} if no val data.
         """
         if self.val_loader is None:
             return {}
 
         self.model.eval()
-        accum:     Dict[str, float] = defaultdict(float)
-        n_batches  = 0
+        accum:    Dict[str, float] = defaultdict(float)
+        n_batches = 0
 
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
         amp_dtype   = torch.bfloat16 if (self.config.bf16 and device_type == "cuda") else None
@@ -356,19 +412,21 @@ class MISMTrainer:
                 )
             for k, v in components.items():
                 accum[k] += v
-            accum["total"] += total_loss.item()
+            accum["total"]      += total_loss.item()
+            accum["gate_fusion"] += output.fusion_gate_values.mean().item()
+            accum["gate_kal"]    += output.kal_gate_values.mean().item()
             n_batches += 1
 
-        denom = max(1, n_batches)
+        denom   = max(1, n_batches)
         metrics = {"val/" + k: v / denom for k, v in accum.items()}
 
         if self.is_main:
-            logger.info("Validation — %s", metrics)
+            self.metrics_logger.log(metrics, step=self.global_step)
         return metrics
 
     def save(
         self,
-        path:    Union[str, "Path"],
+        path:    Union[str, Path],
         epoch:   int,
         metrics: Optional[Dict[str, float]] = None,
     ) -> None:
@@ -387,7 +445,7 @@ class MISMTrainer:
             config_dict=self.config.to_dict(),
         )
 
-    def load(self, path: Union[str, "Path"]) -> Dict[str, Any]:
+    def load(self, path: Union[str, Path]) -> Dict[str, Any]:
         """Load a checkpoint and restore trainer state."""
         meta = load_checkpoint(
             path=path,
@@ -414,7 +472,7 @@ class MISMTrainer:
     ) -> DataLoader:
         sampler = None
         if self.world_size > 1:
-            sampler  = DistributedSampler(
+            sampler = DistributedSampler(
                 dataset,
                 num_replicas=self.world_size,
                 rank=self.local_rank,
@@ -438,33 +496,22 @@ class MISMTrainer:
             for k, v in batch.items()
         }
 
-    def _log(self, metrics: Dict[str, float], step: int) -> None:
-        if not self.is_main:
-            return
-        parts = " | ".join(f"{k}={v:.4f}" for k, v in metrics.items())
-        logger.info("step=%d  %s", step, parts)
-        if self._wandb_run is not None:
-            self._wandb_run.log(metrics, step=step)
-
     def _maybe_save(self, epoch: int, val_metrics: Dict[str, float]) -> None:
-        """Save best checkpoint and periodic checkpoints."""
+        """Save best and periodic checkpoints (main process only)."""
         if not self.is_main:
             return
         ckpt_dir = Path(self.config.checkpoint_dir)
 
         # Periodic save
-        if self.global_step % self.config.save_every_steps == 0:
+        if self.global_step > 0 and self.global_step % self.config.save_every_steps == 0:
             self.save(ckpt_dir / f"step_{self.global_step:07d}.pt", epoch, val_metrics)
 
-        # Best save
+        # Best save (by total val loss)
         val_loss = val_metrics.get("val/total", float("inf"))
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             self.save(ckpt_dir / "best.pt", epoch, val_metrics)
-            logger.info("New best val/total=%.4f → saved to %s/best.pt",
-                        val_loss, ckpt_dir)
-
-
-# Convenience type hint for path-like arguments
-from typing import Union
-from pathlib import Path
+            logger.info(
+                "New best val/total=%.4f → %s/best.pt",
+                val_loss, ckpt_dir,
+            )
