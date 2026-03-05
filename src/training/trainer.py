@@ -295,17 +295,19 @@ class MISMTrainer:
                     kw_mask=batch["kw_mask"],
                     labels=batch["labels"],
                 )
-                emb = self._unwrap().shared.weight  # [V, D]
-                total_loss, components = self.loss_fn(
-                    logits=output.logits,
-                    labels=batch["labels"],
-                    embedding_matrix=emb,
-                    kw_attn_weights=output.kw_attn_weights,
-                    kw_scores=batch["kw_scores"],
-                    kw_mask=batch["kw_mask"],
-                    fusion_gate_values=output.fusion_gate_values,
-                    kal_gate_values=output.kal_gate_values,
-                )
+
+            # ── Loss in float32 (outside autocast for numerical stability) ──
+            emb = self._unwrap().shared.weight  # [V, D]
+            total_loss, components = self.loss_fn(
+                logits=output.logits.float() if use_amp else output.logits,
+                labels=batch["labels"],
+                embedding_matrix=emb.float() if use_amp else emb,
+                kw_attn_weights=output.kw_attn_weights,
+                kw_scores=batch["kw_scores"],
+                kw_mask=batch["kw_mask"],
+                fusion_gate_values=output.fusion_gate_values,
+                kal_gate_values=output.kal_gate_values,
+            )
 
             # ── NaN / Inf guard ───────────────────────────────────────
             if not total_loss.isfinite():
@@ -399,17 +401,17 @@ class MISMTrainer:
                     kw_mask=batch["kw_mask"],
                     labels=batch["labels"],
                 )
-                emb = self._unwrap().shared.weight
-                total_loss, components = self.loss_fn(
-                    logits=output.logits,
-                    labels=batch["labels"],
-                    embedding_matrix=emb,
-                    kw_attn_weights=output.kw_attn_weights,
-                    kw_scores=batch["kw_scores"],
-                    kw_mask=batch["kw_mask"],
-                    fusion_gate_values=output.fusion_gate_values,
-                    kal_gate_values=output.kal_gate_values,
-                )
+            emb = self._unwrap().shared.weight
+            total_loss, components = self.loss_fn(
+                logits=output.logits.float() if use_amp else output.logits,
+                labels=batch["labels"],
+                embedding_matrix=emb.float() if use_amp else emb,
+                kw_attn_weights=output.kw_attn_weights,
+                kw_scores=batch["kw_scores"],
+                kw_mask=batch["kw_mask"],
+                fusion_gate_values=output.fusion_gate_values,
+                kal_gate_values=output.kal_gate_values,
+            )
             for k, v in components.items():
                 accum[k] += v
             accum["total"]      += total_loss.item()
