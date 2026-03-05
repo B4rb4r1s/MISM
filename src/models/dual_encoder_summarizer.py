@@ -213,7 +213,8 @@ class DualEncoderSummarizer(nn.Module):
         t5_model = T5ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path,
         )
-        hidden_size = t5_model.config.d_model
+        # Allow caller to override hidden_size; fall back to model config.
+        hidden_size = kwargs.pop("hidden_size", t5_model.config.d_model)
         return cls(t5_model=t5_model, hidden_size=hidden_size, **kwargs)
 
     # ------------------------------------------------------------------
