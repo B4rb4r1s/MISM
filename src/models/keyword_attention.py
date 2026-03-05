@@ -127,6 +127,9 @@ class KeywordAttentionLayer(nn.Module):
             key_padding_mask=kw_pad_mask,
         )
         # raw_attn: [B, T, K]  (averaged over heads, default behaviour)
+        # Guard: all-padding keyword sequence → softmax(-inf) = NaN
+        kw_attended = torch.nan_to_num(kw_attended, nan=0.0)
+        raw_attn    = torch.nan_to_num(raw_attn,    nan=0.0)
         kw_attended = self.kw_norm(decoder_hidden + self.dropout(kw_attended))  # [B, T, D]
 
         # ── Score-weighted attention (optional, improves focus on top KW) ──
