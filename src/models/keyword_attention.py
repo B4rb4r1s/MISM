@@ -136,6 +136,8 @@ class KeywordAttentionLayer(nn.Module):
         # Re-weight raw attention by kw_scores to amplify high-ranked KWs.
         # scores: [B, K] → broadcast to [B, T, K]
         kw_scores_masked = kw_scores.masked_fill(~kw_mask, 0.0)   # [B, K]
+        # Guard: NaN/Inf in kw_scores propagate into weighted_attn → NaN
+        kw_scores_masked = torch.nan_to_num(kw_scores_masked, nan=0.0, posinf=1.0, neginf=0.0)
         score_weights = kw_scores_masked.unsqueeze(1).expand(B, T, K)  # [B, T, K]
         # Multiply raw attention by score weights and re-normalise
         weighted_attn = raw_attn * score_weights                   # [B, T, K]

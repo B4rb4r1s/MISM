@@ -251,6 +251,11 @@ class DualEncoderSummarizer(nn.Module):
         -------
         DualEncoderOutput
         """
+        # Sanitize kw_scores: NaN/Inf can appear when dataset extraction fails
+        # (e.g. TF-IDF: 0/0 = NaN, or JSON float "inf").  Replace with 0 so
+        # the score-weighted pooling and coverage loss degrade gracefully.
+        kw_scores = torch.nan_to_num(kw_scores, nan=0.0, posinf=1.0, neginf=0.0)
+
         # ── 1. Encode keywords ────────────────────────────────────────
         kw_embs, kw_pooled = self.keywords_encoder(
             kw_input_ids, kw_attention_mask, kw_scores, kw_mask

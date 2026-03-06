@@ -283,6 +283,20 @@ class MISMTrainer:
         for batch_idx, batch in enumerate(self.train_loader):
             batch = self._to_device(batch)
 
+            # ── Input NaN check — ALL ranks, first batch only ─────────
+            # Catches bad data (NaN/Inf kw_scores, etc.) before the forward pass.
+            if batch_idx == 0:
+                for _bkey, _bval in batch.items():
+                    if isinstance(_bval, torch.Tensor) and _bval.is_floating_point():
+                        if not _bval.isfinite().all():
+                            logger.error(
+                                "[rank=%d epoch=%d] Non-finite input data: "
+                                "batch['%s'] has_nan=%s has_inf=%s",
+                                self.local_rank, epoch, _bkey,
+                                _bval.isnan().any().item(),
+                                _bval.isinf().any().item(),
+                            )
+
             # ── Forward ──────────────────────────────────────────────
             with torch.amp.autocast(device_type=device_type, dtype=amp_dtype,
                                     enabled=use_amp):
