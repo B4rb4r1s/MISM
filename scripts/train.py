@@ -9,7 +9,16 @@ Multi-GPU (8×V100, DDP via torchrun):
     torchrun --nproc_per_node=8 scripts/train.py \
         --config configs/gazeta_2stage.yaml
 
-Resume from checkpoint:
+Run only Stage 1:
+    torchrun --nproc_per_node=8 scripts/train.py \
+        --config configs/gazeta_2stage.yaml --stage 1
+
+Run only Stage 2 (load model from Stage 1 checkpoint):
+    torchrun --nproc_per_node=8 scripts/train.py \
+        --config configs/gazeta_2stage.yaml --stage 2 \
+        --resume checkpoints/gazeta_2stage/best.pt
+
+Resume interrupted training (restores optimizer + scheduler state):
     torchrun --nproc_per_node=8 scripts/train.py \
         --config configs/gazeta_2stage.yaml \
         --resume checkpoints/gazeta_2stage/step_0005000.pt
@@ -64,6 +73,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--resume", default=None,
         help="Path to checkpoint (.pt) to resume from",
+    )
+    p.add_argument(
+        "--stage", type=int, default=0, choices=[0, 1, 2],
+        help="Run specific stage only: 1 or 2. Default 0 = both sequentially.",
     )
     p.add_argument(
         "--set", nargs="*", default=[],
@@ -171,7 +184,15 @@ def main() -> None:
         # wasteful and triggers "None of the inputs have requires_grad"
         # warnings.  The decoder, however, receives encoder_hidden_states
         # from the trainable FusionLayer, so gradients DO flow through it.
-        model.decoder.gradient_checkpointing_enable()
+        #
+        # use_reentrant=False is REQUIRED for compatibility with DDP
+        # find_unused_parameters=True.  Reentrant checkpointing triggers
+        # nested backward passes that fire DDP autograd hooks twice for
+        # the same parameter, causing "marked as ready twice" errors
+        # when the decoder is unfrozen (Stage 2).
+        model.decoder.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
 
     # ── Loss ──────────────────────────────────────────────────────────────
     loss_fn = CompositeLoss(
@@ -196,14 +217,31 @@ def main() -> None:
         world_size=world_size,
     )
 
+    # ── Determine which stages to run ─────────────────────────────────────
+    stages = (1, 2) if args.stage == 0 else (args.stage,)
+
     # ── Resume ────────────────────────────────────────────────────────────
     if args.resume:
-        meta = trainer.load(args.resume)
-        logger.info("Resumed from %s  (epoch=%d, step=%d, stage=%d)",
-                    args.resume, meta["epoch"], meta["step"], meta["stage"])
+        # When running a specific stage (--stage 2 --resume best.pt),
+        # load model weights only — optimizer and scheduler will be
+        # created fresh by setup_stage().
+        # When resuming the full pipeline (--stage 0), also restore
+        # optimizer + scheduler state for seamless continuation.
+        weights_only = (args.stage != 0)
+        meta = trainer.load(args.resume, weights_only=weights_only)
+        if weights_only:
+            logger.info(
+                "Loaded model weights from %s for Stage %d",
+                args.resume, args.stage,
+            )
+        else:
+            logger.info(
+                "Resumed from %s  (epoch=%d, step=%d, stage=%d)",
+                args.resume, meta["epoch"], meta["step"], meta["stage"],
+            )
 
     # ── Train ─────────────────────────────────────────────────────────────
-    result = trainer.train()
+    result = trainer.train(stages=stages)
 
     if local_rank == 0:
         logger.info(

@@ -203,8 +203,20 @@ class MISMTrainer:
             stage, total_steps, warmup_steps, lr,
         )
 
-    def train(self) -> Dict[str, Any]:
-        """Run the full GAZETA_2STAGE training procedure.
+    def train(
+        self,
+        stages: tuple = (1, 2),
+    ) -> Dict[str, Any]:
+        """Run the GAZETA_2STAGE training procedure.
+
+        Parameters
+        ----------
+        stages : tuple of ints, default (1, 2).
+            Which stages to execute.  Examples:
+              (1, 2) — full pipeline (default)
+              (1,)   — Stage 1 only
+              (2,)   — Stage 2 only (requires model weights from a Stage 1
+                       checkpoint loaded via ``trainer.load(..., weights_only=True)``)
 
         Returns
         -------
@@ -212,36 +224,38 @@ class MISMTrainer:
         """
         try:
             # ── Stage 1 ───────────────────────────────────────────────
-            logger.info("═══ STAGE 1  (%d epochs) ═══", self.config.stage1_epochs)
-            self.setup_stage(1)
-            for epoch in range(self.config.stage1_epochs):
-                train_metrics = self.train_epoch(epoch)
-                val_metrics   = self.evaluate()
-                self._maybe_save(epoch, val_metrics)
-                # Epoch summary log
-                self.metrics_logger.log(
-                    {**{"epoch_train/" + k: v for k, v in train_metrics.items()},
-                     **val_metrics,
-                     "epoch": float(epoch),
-                     "stage": 1.0},
-                    step=self.global_step,
-                )
+            if 1 in stages:
+                logger.info("═══ STAGE 1  (%d epochs) ═══", self.config.stage1_epochs)
+                self.setup_stage(1)
+                for epoch in range(self.config.stage1_epochs):
+                    train_metrics = self.train_epoch(epoch)
+                    val_metrics   = self.evaluate()
+                    self._maybe_save(epoch, val_metrics)
+                    # Epoch summary log
+                    self.metrics_logger.log(
+                        {**{"epoch_train/" + k: v for k, v in train_metrics.items()},
+                         **val_metrics,
+                         "epoch": float(epoch),
+                         "stage": 1.0},
+                        step=self.global_step,
+                    )
 
             # ── Stage 2 ───────────────────────────────────────────────
-            logger.info("═══ STAGE 2  (%d epochs) ═══", self.config.stage2_epochs)
-            self.setup_stage(2)
-            start_epoch = self.config.stage1_epochs
-            for epoch in range(self.config.stage2_epochs):
-                train_metrics = self.train_epoch(start_epoch + epoch)
-                val_metrics   = self.evaluate()
-                self._maybe_save(start_epoch + epoch, val_metrics)
-                self.metrics_logger.log(
-                    {**{"epoch_train/" + k: v for k, v in train_metrics.items()},
-                     **val_metrics,
-                     "epoch": float(start_epoch + epoch),
-                     "stage": 2.0},
-                    step=self.global_step,
-                )
+            if 2 in stages:
+                logger.info("═══ STAGE 2  (%d epochs) ═══", self.config.stage2_epochs)
+                self.setup_stage(2)
+                start_epoch = self.config.stage1_epochs
+                for epoch in range(self.config.stage2_epochs):
+                    train_metrics = self.train_epoch(start_epoch + epoch)
+                    val_metrics   = self.evaluate()
+                    self._maybe_save(start_epoch + epoch, val_metrics)
+                    self.metrics_logger.log(
+                        {**{"epoch_train/" + k: v for k, v in train_metrics.items()},
+                         **val_metrics,
+                         "epoch": float(start_epoch + epoch),
+                         "stage": 2.0},
+                        step=self.global_step,
+                    )
 
         finally:
             # Always close logger — even on error / KeyboardInterrupt
@@ -478,16 +492,30 @@ class MISMTrainer:
             config_dict=self.config.to_dict(),
         )
 
-    def load(self, path: Union[str, Path]) -> Dict[str, Any]:
-        """Load a checkpoint and restore trainer state."""
+    def load(
+        self,
+        path: Union[str, Path],
+        weights_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Load a checkpoint and restore trainer state.
+
+        Parameters
+        ----------
+        path         : path to the .pt checkpoint file.
+        weights_only : if True, only restore model weights — skip optimizer,
+                       scheduler, and step/stage counters.  Use this when
+                       loading a Stage 1 checkpoint to start Stage 2 with a
+                       fresh optimizer (``--stage 2 --resume best.pt``).
+        """
         meta = load_checkpoint(
             path=path,
             model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
+            optimizer=None if weights_only else self.optimizer,
+            scheduler=None if weights_only else self.scheduler,
         )
-        self.global_step   = meta["step"]
-        self.current_stage = meta["stage"]
+        if not weights_only:
+            self.global_step   = meta["step"]
+            self.current_stage = meta["stage"]
         return meta
 
     # ------------------------------------------------------------------
