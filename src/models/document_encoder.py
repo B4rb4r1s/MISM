@@ -117,6 +117,10 @@ class DocumentEncoder(nn.Module):
             attention_mask=flat_mask,
         )
         hidden = encoder_out.last_hidden_state             # [B*W, S, D]
+        # Guard: fully-padded windows (attention_mask=all 0) produce NaN
+        # inside T5 self-attention (softmax of all -inf = 0/0 = NaN).
+        # These positions are masked out downstream, so replacing with 0 is safe.
+        hidden = torch.nan_to_num(hidden, nan=0.0)
         full_sequence = hidden.view(B, W, S, D)            # [B, W, S, D]
 
         # ── 2. Mean pooling per window (mask-aware) ───────────────────

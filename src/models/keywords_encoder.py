@@ -103,6 +103,9 @@ class KeywordsEncoder(nn.Module):
             attention_mask=flat_mask,
         )
         hidden = encoder_out.last_hidden_state             # [B*K, L, D]
+        # Guard: padding keyword slots (attention_mask=all 0) produce NaN inside
+        # T5 self-attention.  Replace with 0 — downstream kw_mask excludes them.
+        hidden = torch.nan_to_num(hidden, nan=0.0)
 
         # ── 2. Mean pooling per keyword (mask-aware) ──────────────────
         mask_exp  = flat_mask.unsqueeze(-1).float()        # [B*K, L, 1]
