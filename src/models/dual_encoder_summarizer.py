@@ -321,14 +321,33 @@ class DualEncoderSummarizer(nn.Module):
         self._nan_probe("5_logits",    enhanced_logits)
         self._nan_probe("5_kal_gates", kal_gates)
 
+        # Detach informational outputs that do NOT participate in any loss
+        # component.  Without .detach(), DDP sees the upstream parameters as
+        # "used" in the forward graph but never receiving gradients during
+        # backward, which triggers:
+        #   RuntimeError: Expected to have finished reduction in the prior
+        #   iteration before starting a new one.
+        #
+        # • doc_pooled  — produced by DocumentEncoder's custom window-level
+        #                  layers (self-attn, cross-attn, FFN), which are
+        #                  trainable but have NO path to the loss.
+        #                  (full_sequence comes from the frozen T5 backbone
+        #                   *before* those layers.)
+        # • kw_pooled   — its source layers already receive gradients
+        #                  through kw_embs → FusionLayer → loss, but the
+        #                  returned tensor itself is unused; detach is a
+        #                  safety measure.
+        # • decoder_hidden — the decoder is frozen in Stage 1 (requires_grad
+        #                    is False), so DDP ignores it, but detaching
+        #                    makes the contract explicit.
         return DualEncoderOutput(
             logits=enhanced_logits,
             kw_attn_weights=kw_attn_weights,
             fusion_gate_values=fusion_gates,
             kal_gate_values=kal_gates,
-            doc_pooled=doc_pooled,
-            kw_pooled=kw_pooled,
-            decoder_hidden=decoder_hidden,
+            doc_pooled=doc_pooled.detach(),
+            kw_pooled=kw_pooled.detach(),
+            decoder_hidden=decoder_hidden.detach(),
         )
 
     # ------------------------------------------------------------------
