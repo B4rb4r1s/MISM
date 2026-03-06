@@ -262,6 +262,8 @@ class DualEncoderSummarizer(nn.Module):
         )
         # kw_embs:  [B, K, D]
         # kw_pooled:[B, D]
+        self._nan_probe("1_kw_embs",   kw_embs)
+        self._nan_probe("1_kw_pooled", kw_pooled)
 
         # ── 2. Encode document ────────────────────────────────────────
         doc_pooled, full_sequence, _ = self.document_encoder(
@@ -269,6 +271,8 @@ class DualEncoderSummarizer(nn.Module):
         )
         # doc_pooled:    [B, D]
         # full_sequence: [B, W, S, D]
+        self._nan_probe("2_doc_pooled",     doc_pooled)
+        self._nan_probe("2_full_sequence",  full_sequence)
 
         # ── 3. Fuse doc and keywords ──────────────────────────────────
         encoder_hs, encoder_mask, fusion_gates = self.fusion_layer(
@@ -277,6 +281,8 @@ class DualEncoderSummarizer(nn.Module):
         # encoder_hs:    [B, L+K, D]
         # encoder_mask:  [B, L+K]
         # fusion_gates:  [B, L]
+        self._nan_probe("3_encoder_hs",    encoder_hs)
+        self._nan_probe("3_fusion_gates",  fusion_gates)
 
         # ── 4. T5 Decoder (teacher forcing) ───────────────────────────
         if labels is not None:
@@ -303,6 +309,7 @@ class DualEncoderSummarizer(nn.Module):
             return_dict=True,
         )
         decoder_hidden = decoder_outputs.last_hidden_state  # [B, T, D]
+        self._nan_probe("4_decoder_hidden", decoder_hidden)
 
         # ── 5. Keyword Attention Layer ────────────────────────────────
         enhanced_logits, kw_attn_weights, kal_gates = self.keyword_attention_layer(
@@ -311,6 +318,8 @@ class DualEncoderSummarizer(nn.Module):
         # enhanced_logits:  [B, T, V]
         # kw_attn_weights:  [B, T, K]
         # kal_gates:        [B, T]
+        self._nan_probe("5_logits",    enhanced_logits)
+        self._nan_probe("5_kal_gates", kal_gates)
 
         return DualEncoderOutput(
             logits=enhanced_logits,
@@ -321,6 +330,29 @@ class DualEncoderSummarizer(nn.Module):
             kw_pooled=kw_pooled,
             decoder_hidden=decoder_hidden,
         )
+
+    # ------------------------------------------------------------------
+    # Debug helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _nan_probe(name: str, tensor: torch.Tensor) -> None:
+        """Log once per forward pass if tensor contains NaN or Inf."""
+        if not tensor.isfinite().all():
+            logger.error(
+                "NaN probe → %s  shape=%s  nan=%d  inf=%d  "
+                "min=%.4g  max=%.4g",
+                name,
+                list(tensor.shape),
+                tensor.isnan().sum().item(),
+                tensor.isinf().sum().item(),
+                tensor[tensor.isfinite()].min().item()
+                if tensor.isfinite().any()
+                else float("nan"),
+                tensor[tensor.isfinite()].max().item()
+                if tensor.isfinite().any()
+                else float("nan"),
+            )
 
     # ------------------------------------------------------------------
     # Training strategy helpers
