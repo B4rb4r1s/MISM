@@ -25,7 +25,7 @@ def check_split(path: Path, fix: bool = False) -> int:
         scores = rec.get("kw_scores", [])
         bad_pos = [
             (j, s) for j, s in enumerate(scores)
-            if not math.isfinite(float(s)) if isinstance(s, (int, float)) else False
+            if isinstance(s, (int, float)) and not math.isfinite(float(s))
         ]
         if bad_pos:
             bad_indices.append(i)
