@@ -23,6 +23,7 @@ Override individual config values:
 from __future__ import annotations
 
 import argparse
+import datetime
 import logging
 import os
 import sys
@@ -124,6 +125,21 @@ def main() -> None:
     cfg = load_config(args.config, overrides=overrides)
 
     torch.manual_seed(cfg.seed + rank)
+
+    # ── File logging (rank 0 only) ────────────────────────────────────────
+    if local_rank == 0:
+        _log_dir = Path(cfg.checkpoint_dir) / "logs"
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        _ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        _log_path = _log_dir / f"train_{_ts}_rank{rank}.log"
+        _fh  = logging.FileHandler(_log_path, mode="w", encoding="utf-8")
+        _fh.setLevel(logging.DEBUG)
+        _fh.setFormatter(logging.Formatter(
+            "[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        logging.getLogger().addHandler(_fh)
+        logger.info("Log file: %s", _log_path)
 
     if local_rank == 0:
         logger.info("Config:\n%s", cfg)
