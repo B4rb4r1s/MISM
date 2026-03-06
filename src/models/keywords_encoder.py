@@ -27,6 +27,8 @@ kw_pooled      [B, D]      global keyword summary (weighted pool)
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutput
@@ -98,14 +100,24 @@ class KeywordsEncoder(nn.Module):
         flat_ids  = kw_input_ids.view(B * K, L)          # [B*K, L]
         flat_mask = kw_attention_mask.view(B * K, L)      # [B*K, L]
 
-        encoder_out: BaseModelOutput = self.t5_encoder(
-            input_ids=flat_ids,
-            attention_mask=flat_mask,
-        )
-        hidden = encoder_out.last_hidden_state             # [B*K, L, D]
-        # Guard: padding keyword slots (attention_mask=all 0) produce NaN inside
-        # T5 self-attention.  Replace with 0 — downstream kw_mask excludes them.
-        hidden = torch.nan_to_num(hidden, nan=0.0)
+        # When the T5 backbone is frozen, skip storing intermediate
+        # activations for backward — saves GPU memory.
+        _backbone_needs_grad = False
+        for _n, _p in self.t5_encoder.named_parameters():
+            if "embed_tokens" not in _n:
+                _backbone_needs_grad = _p.requires_grad
+                break
+        _ctx = contextlib.nullcontext() if _backbone_needs_grad else torch.no_grad()
+
+        with _ctx:
+            encoder_out: BaseModelOutput = self.t5_encoder(
+                input_ids=flat_ids,
+                attention_mask=flat_mask,
+            )
+            hidden = encoder_out.last_hidden_state             # [B*K, L, D]
+            # Guard: padding keyword slots (attention_mask=all 0) produce NaN inside
+            # T5 self-attention.  Replace with 0 — downstream kw_mask excludes them.
+            hidden = torch.nan_to_num(hidden, nan=0.0)
 
         # ── 2. Mean pooling per keyword (mask-aware) ──────────────────
         mask_exp  = flat_mask.unsqueeze(-1).float()        # [B*K, L, 1]

@@ -32,6 +32,8 @@ window_weights  [B, W]         normalised window relevance weights
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutput
@@ -112,15 +114,28 @@ class DocumentEncoder(nn.Module):
         flat_ids  = input_windows.view(B * W, S)           # [B*W, S]
         flat_mask = window_attention_mask.view(B * W, S)   # [B*W, S]
 
-        encoder_out: BaseModelOutput = self.t5_encoder(
-            input_ids=flat_ids,
-            attention_mask=flat_mask,
-        )
-        hidden = encoder_out.last_hidden_state             # [B*W, S, D]
-        # Guard: fully-padded windows (attention_mask=all 0) produce NaN
-        # inside T5 self-attention (softmax of all -inf = 0/0 = NaN).
-        # These positions are masked out downstream, so replacing with 0 is safe.
-        hidden = torch.nan_to_num(hidden, nan=0.0)
+        # When the T5 backbone is frozen, skip storing intermediate
+        # activations for backward — saves ~10+ GB GPU memory.
+        # Gradients still flow to downstream trainable modules (FusionLayer)
+        # because their own parameters create autograd nodes.
+        _backbone_needs_grad = False
+        for _n, _p in self.t5_encoder.named_parameters():
+            if "embed_tokens" not in _n:
+                _backbone_needs_grad = _p.requires_grad
+                break
+        _ctx = contextlib.nullcontext() if _backbone_needs_grad else torch.no_grad()
+
+        with _ctx:
+            encoder_out: BaseModelOutput = self.t5_encoder(
+                input_ids=flat_ids,
+                attention_mask=flat_mask,
+            )
+            hidden = encoder_out.last_hidden_state             # [B*W, S, D]
+            # Guard: fully-padded windows (attention_mask=all 0) produce NaN
+            # inside T5 self-attention (softmax of all -inf = 0/0 = NaN).
+            # These positions are masked out downstream, so replacing with 0 is safe.
+            hidden = torch.nan_to_num(hidden, nan=0.0)
+
         full_sequence = hidden.view(B, W, S, D)            # [B, W, S, D]
 
         # ── 2. Mean pooling per window (mask-aware) ───────────────────
