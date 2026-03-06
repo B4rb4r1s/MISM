@@ -313,9 +313,26 @@ class MISMTrainer:
             if not total_loss.isfinite():
                 logger.error(
                     "Non-finite loss (%.6g) at step %d epoch %d batch %d — "
-                    "saving emergency checkpoint",
+                    "components: l_gen=%.4g l_cover=%.4g l_bert=%.4g l_gate=%.4g",
                     total_loss.item(), self.global_step, epoch, batch_idx,
+                    components.get("l_gen",   float("nan")),
+                    components.get("l_cover", float("nan")),
+                    components.get("l_bert",  float("nan")),
+                    components.get("l_gate",  float("nan")),
                 )
+                for _name, _t in [
+                    ("logits",             output.logits),
+                    ("kw_attn_weights",    output.kw_attn_weights),
+                    ("fusion_gate_values", output.fusion_gate_values),
+                    ("kal_gate_values",    output.kal_gate_values),
+                ]:
+                    if not _t.isfinite().all():
+                        logger.error(
+                            "  output.%s: has_nan=%s has_inf=%s",
+                            _name,
+                            _t.isnan().any().item(),
+                            _t.isinf().any().item(),
+                        )
                 if self.is_main:
                     self.save(
                         Path(self.config.checkpoint_dir) / "emergency.pt",
