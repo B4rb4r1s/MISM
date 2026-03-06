@@ -165,9 +165,12 @@ def main() -> None:
     )
 
     if cfg.gradient_checkpointing:
-        # Enable gradient checkpointing on the T5 encoder/decoder stacks
-        model.document_encoder.t5_encoder.gradient_checkpointing_enable()
-        model.keywords_encoder.t5_encoder.gradient_checkpointing_enable()
+        # Enable gradient checkpointing ONLY on the T5 decoder stack.
+        # The T5 encoders are always frozen in GAZETA_2STAGE and receive
+        # integer token IDs (no requires_grad), so checkpointing them is
+        # wasteful and triggers "None of the inputs have requires_grad"
+        # warnings.  The decoder, however, receives encoder_hidden_states
+        # from the trainable FusionLayer, so gradients DO flow through it.
         model.decoder.gradient_checkpointing_enable()
 
     # ── Loss ──────────────────────────────────────────────────────────────

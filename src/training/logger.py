@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -104,13 +105,30 @@ class MetricsLogger:
         # ── W&B ───────────────────────────────────────────────────────
         if use_wandb:
             if _WANDB_OK:
-                self._wb_run = _wandb.init(
-                    project=wandb_project,
-                    name=wandb_run_name,
-                    config=config_dict,
-                    resume="allow",
-                )
-                _log.info("W&B run → %s", self._wb_run.url if self._wb_run else "?")
+                # In DDP training, an interactive wandb login prompt blocks
+                # the main process and causes NCCL timeouts on other ranks.
+                # Check for a valid API key *before* calling wandb.init().
+                _api_key = os.environ.get("WANDB_API_KEY", "")
+                if not _api_key:
+                    try:
+                        _api_key = _wandb.api.api_key or ""
+                    except Exception:
+                        _api_key = ""
+                if _api_key:
+                    self._wb_run = _wandb.init(
+                        project=wandb_project,
+                        name=wandb_run_name,
+                        config=config_dict,
+                        resume="allow",
+                    )
+                    _log.info("W&B run → %s",
+                              self._wb_run.url if self._wb_run else "?")
+                else:
+                    _log.warning(
+                        "use_wandb=True but W&B is not authenticated. "
+                        "Run `wandb login` on the server or set the "
+                        "WANDB_API_KEY env var.  Continuing without W&B."
+                    )
             else:
                 _log.warning(
                     "use_wandb=True but 'wandb' is not installed. "
