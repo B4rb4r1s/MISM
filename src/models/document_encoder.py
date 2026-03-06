@@ -134,6 +134,7 @@ class DocumentEncoder(nn.Module):
             win_embs, win_embs, win_embs,
             key_padding_mask=win_pad_mask,
         )
+        attended = torch.nan_to_num(attended, nan=0.0)  # guard: all-pad → NaN in softmax
         win_embs = self.window_norm1(win_embs + self.dropout(attended))  # [B, W, D]
 
         # Apply FFN on window representations
@@ -157,6 +158,8 @@ class DocumentEncoder(nn.Module):
         # MultiheadAttention returns attn_output_weights averaged over heads
         # when average_attn_weights=True (default): shape [B, 1, W]
         window_weights = window_weights.squeeze(1)          # [B, W]
+        # Guard: NaN from all-pad keys or NaN win_embs propagating into attn weights
+        window_weights = torch.nan_to_num(window_weights, nan=0.0)
 
         # Mask padding windows (set to 0 so they don't contribute)
         window_weights = window_weights.masked_fill(win_pad_mask, 0.0)
