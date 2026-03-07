@@ -110,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         "--device", default=None,
         help="Device: 'cuda', 'cuda:0', 'cpu' (default: auto-detect)",
     )
+    p.add_argument(
+        "--bypass-kal", action="store_true", default=False,
+        help="Diagnostic mode: skip KAL and use T5 decoder → lm_head "
+             "directly. Useful to verify that the encoder/decoder pipeline "
+             "works correctly without KAL interference.",
+    )
     return p.parse_args()
 
 
@@ -178,6 +184,11 @@ def main() -> None:
     load_checkpoint(path=args.checkpoint, model=model)
     model.to(device)
     model.eval()
+    if args.bypass_kal:
+        logger.info(
+            "*** DIAGNOSTIC MODE: bypass_kal=True — KAL is skipped, "
+            "using T5 decoder → lm_head directly ***"
+        )
     logger.info("Model loaded and moved to %s", device)
 
     # ── Generate ──────────────────────────────────────────────────────
@@ -203,6 +214,7 @@ def main() -> None:
             kw_scores=batch["kw_scores"],
             kw_mask=batch["kw_mask"],
             max_length=args.max_length,
+            bypass_kal=args.bypass_kal,
         )
 
         # Decode
@@ -257,7 +269,8 @@ def main() -> None:
     if output_path is None:
         output_dir = Path("results")
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"samples_{args.split}.json"
+        suffix = f"_bypass_kal" if args.bypass_kal else ""
+        output_path = output_dir / f"samples_{args.split}{suffix}.json"
     else:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)

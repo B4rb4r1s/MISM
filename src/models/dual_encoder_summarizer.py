@@ -183,6 +183,20 @@ class DualEncoderSummarizer(nn.Module):
         )
         self.keyword_attention_layer.set_lm_head(self.lm_head)
 
+        # ── T5 scaling factor (must match what T5ForConditionalGeneration does) ─
+        # When tie_word_embeddings=True the original T5 forward applies
+        #   hidden = hidden * (d_model ** -0.5)  BEFORE the lm_head.
+        # We extracted lm_head into KAL, so we replicate this scaling there.
+        self._tie_word_embeddings: bool = cfg.tie_word_embeddings
+        self._model_dim: int = hidden_size
+        if self._tie_word_embeddings:
+            scale = hidden_size ** -0.5
+            self.keyword_attention_layer.set_lm_head_scale(scale)
+            logger.info(
+                "T5 tie_word_embeddings=True → KAL lm_head scale = %.6f",
+                scale,
+            )
+
     # ------------------------------------------------------------------
     # Alternative constructor
     # ------------------------------------------------------------------
@@ -367,6 +381,7 @@ class DualEncoderSummarizer(nn.Module):
         repetition_penalty:    float = 1.2,
         no_repeat_ngram_size:  int   = 3,
         eos_token_id:          int   = 1,
+        bypass_kal:            bool  = False,
     ) -> torch.Tensor:
         """Greedy autoregressive decoding with KV cache.
 
@@ -376,6 +391,10 @@ class DualEncoderSummarizer(nn.Module):
         repetition_penalty    : > 1.0 discourages repetition.
         no_repeat_ngram_size  : ban n-grams that already appeared.
         eos_token_id          : end-of-sequence token id (default 1 for T5).
+        bypass_kal            : if True, skip KAL and project decoder hidden
+                                states to vocabulary directly via lm_head
+                                (diagnostic mode to verify encoder/decoder
+                                quality without KAL interference).
 
         Returns
         -------
@@ -396,6 +415,10 @@ class DualEncoderSummarizer(nn.Module):
 
         B      = encoder_hs.size(0)
         device = encoder_hs.device
+
+        # ── T5 lm_head scaling (for bypass_kal mode) ──────────────────
+        # Replicate the same scaling T5ForConditionalGeneration applies.
+        _bypass_scale = (self._model_dim ** -0.5) if self._tie_word_embeddings else 1.0
 
         # ── 4.  Autoregressive decode ──────────────────────────────────
         generated = torch.full(
@@ -419,10 +442,16 @@ class DualEncoderSummarizer(nn.Module):
             past_key_values = decoder_out.past_key_values
             dec_hidden = decoder_out.last_hidden_state       # [B, 1, D]
 
-            logits, _, _ = self.keyword_attention_layer(
-                dec_hidden, kw_embs, kw_mask, kw_scores,
-            )
-            next_logits = logits[:, -1, :]                   # [B, V]
+            if bypass_kal:
+                # Diagnostic: use T5 decoder → lm_head directly (no KAL)
+                next_logits = self.lm_head(
+                    dec_hidden * _bypass_scale
+                )[:, -1, :]                                  # [B, V]
+            else:
+                logits, _, _ = self.keyword_attention_layer(
+                    dec_hidden, kw_embs, kw_mask, kw_scores,
+                )
+                next_logits = logits[:, -1, :]               # [B, V]
 
             # ── Repetition penalty ─────────────────────────────────
             if repetition_penalty != 1.0:
@@ -481,12 +510,22 @@ class DualEncoderSummarizer(nn.Module):
     # ------------------------------------------------------------------
 
     def freeze_encoders(self) -> None:
-        """Freeze both T5 encoder backbones (document + keyword)."""
-        for param in self.document_encoder.t5_encoder.parameters():
-            param.requires_grad_(False)
-        for param in self.keywords_encoder.t5_encoder.parameters():
-            param.requires_grad_(False)
-        logger.info("Both T5 encoder backbones frozen.")
+        """Freeze both T5 encoder backbones (document + keyword).
+
+        The shared embedding (``embed_tokens``) is explicitly **kept
+        trainable** because it is shared with the decoder and lm_head.
+        Freezing it here would also freeze the vocabulary projection,
+        preventing the model from learning to generate.
+        """
+        for name, param in self.document_encoder.t5_encoder.named_parameters():
+            if "embed_tokens" not in name:
+                param.requires_grad_(False)
+        for name, param in self.keywords_encoder.t5_encoder.named_parameters():
+            if "embed_tokens" not in name:
+                param.requires_grad_(False)
+        # Explicit safety net: ensure shared stays trainable
+        self.shared.weight.requires_grad_(True)
+        logger.info("Both T5 encoder backbones frozen (shared embedding kept trainable).")
 
     def unfreeze_encoders(self) -> None:
         """Unfreeze both T5 encoder backbones."""
@@ -497,10 +536,17 @@ class DualEncoderSummarizer(nn.Module):
         logger.info("Both T5 encoder backbones unfrozen.")
 
     def freeze_decoder(self) -> None:
-        """Freeze the T5 decoder backbone."""
-        for param in self.decoder.parameters():
-            param.requires_grad_(False)
-        logger.info("T5 decoder backbone frozen.")
+        """Freeze the T5 decoder backbone.
+
+        The shared embedding (``embed_tokens``) is explicitly **kept
+        trainable** — see :meth:`freeze_encoders` for rationale.
+        """
+        for name, param in self.decoder.named_parameters():
+            if "embed_tokens" not in name:
+                param.requires_grad_(False)
+        # Explicit safety net: ensure shared stays trainable
+        self.shared.weight.requires_grad_(True)
+        logger.info("T5 decoder backbone frozen (shared embedding kept trainable).")
 
     def unfreeze_decoder(self) -> None:
         """Unfreeze the T5 decoder backbone."""
