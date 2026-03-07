@@ -66,6 +66,11 @@ class KeywordAttentionLayer(nn.Module):
         # ── Gated fusion ──────────────────────────────────────────────
         # gate ∈ (0, 1)^D per (batch, position, dim)
         self.gate_proj = nn.Linear(hidden_size * 2, hidden_size)
+        # Initialise gate bias to −2 so sigmoid(−2) ≈ 0.12 at start.
+        # This means enhanced ≈ 0.88 * decoder_hidden + 0.12 * kw_attended,
+        # preserving the pretrained decoder's fluency while KAL gradually
+        # learns to inject keyword information.
+        nn.init.constant_(self.gate_proj.bias, -2.0)
 
         # ── FFN ───────────────────────────────────────────────────────
         self.ffn = nn.Sequential(
@@ -80,6 +85,13 @@ class KeywordAttentionLayer(nn.Module):
         # The lm_head weights are shared with T5 (set via set_lm_head).
         self.lm_head: nn.Module | None = None
 
+        # ── T5 scaling factor ────────────────────────────────────────
+        # When tie_word_embeddings=True, T5ForConditionalGeneration
+        # applies  hidden * (d_model ** -0.5)  before the lm_head.
+        # We extracted lm_head from T5 and use it here, so we must
+        # replicate that scaling.  Set via set_lm_head_scale().
+        self.lm_head_scale: float = 1.0
+
         self.dropout = nn.Dropout(dropout)
 
     # ------------------------------------------------------------------
@@ -87,6 +99,14 @@ class KeywordAttentionLayer(nn.Module):
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Attach the T5 LM head (shared weights — no duplication)."""
         self.lm_head = lm_head
+
+    def set_lm_head_scale(self, scale: float) -> None:
+        """Set the T5 scaling factor applied before lm_head projection.
+
+        For models with ``tie_word_embeddings=True``, this should be
+        ``hidden_size ** -0.5`` (≈0.036 for d_model=768).
+        """
+        self.lm_head_scale = scale
 
     # ------------------------------------------------------------------
 
@@ -155,6 +175,10 @@ class KeywordAttentionLayer(nn.Module):
         enhanced = self.ffn_norm(enhanced + self.dropout(self.ffn(enhanced)))  # [B, T, D]
 
         # ── 4. LM Head (shared weights) ───────────────────────────────
+        # Apply T5 scaling factor: when tie_word_embeddings=True, T5
+        # rescales hidden states by (d_model ** -0.5) before lm_head.
+        if self.lm_head_scale != 1.0:
+            enhanced = enhanced * self.lm_head_scale
         enhanced_logits = self.lm_head(enhanced)                        # [B, T, V]
 
         return enhanced_logits, kw_attn_weights, gate_values
