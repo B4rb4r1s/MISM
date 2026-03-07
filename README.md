@@ -24,6 +24,8 @@ torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml
 
 # Возобновить с чекпоинта
 torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml --resume checkpoints/gazeta_2stage/step_0005000.pt
+# Возобновить с чекпоинта со второго этапа
+torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml --stage 2 --resume checkpoints/gazeta_2stage/best.pt
 ```
 
 Tensorboard с прокинутыми портами на `6006`
