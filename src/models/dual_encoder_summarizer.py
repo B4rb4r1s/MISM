@@ -351,6 +351,109 @@ class DualEncoderSummarizer(nn.Module):
         )
 
     # ------------------------------------------------------------------
+    # Generation (inference)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_windows:         torch.Tensor,   # [B, W, S]
+        window_attention_mask: torch.Tensor,   # [B, W, S]
+        kw_input_ids:          torch.Tensor,   # [B, K, L]
+        kw_attention_mask:     torch.Tensor,   # [B, K, L]
+        kw_scores:             torch.Tensor,   # [B, K]
+        kw_mask:               torch.Tensor,   # [B, K]
+        max_length:            int   = 256,
+        repetition_penalty:    float = 1.2,
+        no_repeat_ngram_size:  int   = 3,
+        eos_token_id:          int   = 1,
+    ) -> torch.Tensor:
+        """Greedy autoregressive decoding with KV cache.
+
+        Parameters
+        ----------
+        max_length            : maximum number of generated tokens.
+        repetition_penalty    : > 1.0 discourages repetition.
+        no_repeat_ngram_size  : ban n-grams that already appeared.
+        eos_token_id          : end-of-sequence token id (default 1 for T5).
+
+        Returns
+        -------
+        generated_ids : torch.Tensor  [B, T]  (includes decoder_start_token)
+        """
+        kw_scores = torch.nan_to_num(kw_scores, nan=0.0, posinf=1.0, neginf=0.0)
+
+        # ── 1-3.  Encode (keywords → document → fusion) ───────────────
+        kw_embs, kw_pooled = self.keywords_encoder(
+            kw_input_ids, kw_attention_mask, kw_scores, kw_mask,
+        )
+        _, full_sequence, _ = self.document_encoder(
+            input_windows, window_attention_mask, kw_pooled,
+        )
+        encoder_hs, encoder_mask, _ = self.fusion_layer(
+            full_sequence, window_attention_mask, kw_embs, kw_mask,
+        )
+
+        B      = encoder_hs.size(0)
+        device = encoder_hs.device
+
+        # ── 4.  Autoregressive decode ──────────────────────────────────
+        generated = torch.full(
+            (B, 1), self.decoder_start_token_id,
+            dtype=torch.long, device=device,
+        )
+        finished         = torch.zeros(B, dtype=torch.bool, device=device)
+        past_key_values  = None
+
+        for step in range(max_length):
+            dec_input = generated if step == 0 else generated[:, -1:]
+
+            decoder_out = self.decoder(
+                input_ids=dec_input,
+                encoder_hidden_states=encoder_hs,
+                encoder_attention_mask=encoder_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_key_values = decoder_out.past_key_values
+            dec_hidden = decoder_out.last_hidden_state       # [B, 1, D]
+
+            logits, _, _ = self.keyword_attention_layer(
+                dec_hidden, kw_embs, kw_mask, kw_scores,
+            )
+            next_logits = logits[:, -1, :]                   # [B, V]
+
+            # ── Repetition penalty ─────────────────────────────────
+            if repetition_penalty != 1.0:
+                for b in range(B):
+                    prev = generated[b].unique()
+                    pos = next_logits[b, prev] > 0
+                    next_logits[b, prev[pos]]  /= repetition_penalty
+                    next_logits[b, prev[~pos]] *= repetition_penalty
+
+            # ── No-repeat n-gram blocking ──────────────────────────
+            if no_repeat_ngram_size > 0 and generated.size(1) >= no_repeat_ngram_size:
+                n = no_repeat_ngram_size
+                for b in range(B):
+                    tokens = generated[b].tolist()
+                    prefix = tuple(tokens[-(n - 1):])
+                    for i in range(len(tokens) - n + 1):
+                        if tuple(tokens[i : i + n - 1]) == prefix:
+                            next_logits[b, tokens[i + n - 1]] = float("-inf")
+
+            # ── Greedy select ──────────────────────────────────────
+            next_token = next_logits.argmax(dim=-1, keepdim=True)   # [B, 1]
+            next_token.masked_fill_(finished.unsqueeze(1), self.pad_token_id)
+            generated  = torch.cat([generated, next_token], dim=1)
+
+            finished = finished | (next_token.squeeze(1) == eos_token_id)
+            if finished.all():
+                break
+
+        return generated
+
+    # ------------------------------------------------------------------
     # Debug helper
     # ------------------------------------------------------------------
 
