@@ -32,3 +32,11 @@ Tensorboard с прокинутыми портами на `6006`
 ```bash
 tensorboard --logdir checkpoints/gazeta_2stage/logs/tensorboard --port=6006 --bind_al
 ```
+
+```bash
+# Генерация 20 примеров из val-набора (можно запустить локально на GPU)
+python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 20
+
+# Или на CPU (медленнее, но без GPU)
+python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 5 --device cpu
+```
