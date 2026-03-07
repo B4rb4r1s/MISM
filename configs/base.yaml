@@ -42,7 +42,8 @@ loss:
   lambda_bert:          0.15
   lambda_gate:          0.05
   label_smoothing:      0.1
-  gate_threshold:       0.3
+  gate_threshold_low:   0.2
+  gate_threshold_high:  0.5
 
 data:
   train_path:  "dataset/splits/train.json"

@@ -219,22 +219,32 @@ class SoftBERTScoreLoss(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class GateLoss(nn.Module):
-    """Hinge loss that penalises gate values below a minimum threshold.
+    """Bilateral hinge loss that keeps gate values inside [low, high].
 
-    L_gate = mean( ReLU(threshold − mean_gate) )
+    L_gate = mean(
+        ReLU(low  − mean_gate)      ← penalise under-active gates
+      + ReLU(mean_gate − high)      ← penalise over-active gates
+    )
+
+    The loss is zero when low ≤ mean_gate ≤ high, and grows linearly
+    outside the corridor.
 
     Applied separately to the fusion gate and, optionally, the KAL gate.
-    The loss is zero when the average gate value ≥ threshold, and grows
-    linearly as gates close further.
 
     Parameters
     ----------
-    threshold : float — minimum desired average gate value (default 0.3).
+    threshold_low  : float — minimum desired average gate value (default 0.2).
+    threshold_high : float — maximum desired average gate value (default 0.5).
     """
 
-    def __init__(self, threshold: float = 0.3) -> None:
+    def __init__(
+        self,
+        threshold_low:  float = 0.2,
+        threshold_high: float = 0.5,
+    ) -> None:
         super().__init__()
-        self.threshold = threshold
+        self.threshold_low  = threshold_low
+        self.threshold_high = threshold_high
 
     def forward(
         self,
@@ -247,11 +257,13 @@ class GateLoss(nn.Module):
         Scalar hinge loss.
         """
         components: list[torch.Tensor] = [
-            F.relu(self.threshold - fusion_gate_values.mean()),
+            F.relu(self.threshold_low  - fusion_gate_values.mean())
+            + F.relu(fusion_gate_values.mean() - self.threshold_high),
         ]
         if kal_gate_values is not None:
             components.append(
-                F.relu(self.threshold - kal_gate_values.mean()),
+                F.relu(self.threshold_low  - kal_gate_values.mean())
+                + F.relu(kal_gate_values.mean() - self.threshold_high),
             )
         return torch.stack(components).mean()
 
@@ -272,19 +284,21 @@ class CompositeLoss(nn.Module):
     lambda_bert    : float — weight for L_bert  (default 0.15).
     lambda_gate    : float — weight for L_gate  (default 0.05).
     label_smoothing: float — smoothing for L_gen (default 0.1).
-    gate_threshold : float — hinge threshold for L_gate (default 0.3).
+    gate_threshold_low  : float — min desired gate value (default 0.2).
+    gate_threshold_high : float — max desired gate value (default 0.5).
     ignore_index   : int   — padding label id (default -100).
     """
 
     def __init__(
         self,
-        lambda_gen:      float = 0.65,
-        lambda_cover:    float = 0.15,
-        lambda_bert:     float = 0.15,
-        lambda_gate:     float = 0.05,
-        label_smoothing: float = 0.1,
-        gate_threshold:  float = 0.3,
-        ignore_index:    int   = -100,
+        lambda_gen:          float = 0.65,
+        lambda_cover:        float = 0.15,
+        lambda_bert:         float = 0.15,
+        lambda_gate:         float = 0.05,
+        label_smoothing:     float = 0.1,
+        gate_threshold_low:  float = 0.2,
+        gate_threshold_high: float = 0.5,
+        ignore_index:        int   = -100,
     ) -> None:
         super().__init__()
         self.lambda_gen   = lambda_gen
@@ -298,7 +312,10 @@ class CompositeLoss(nn.Module):
         )
         self.cover_loss = KeywordCoverageLoss(ignore_index=ignore_index)
         self.bert_loss  = SoftBERTScoreLoss(ignore_index=ignore_index)
-        self.gate_loss  = GateLoss(threshold=gate_threshold)
+        self.gate_loss  = GateLoss(
+            threshold_low=gate_threshold_low,
+            threshold_high=gate_threshold_high,
+        )
 
     def forward(
         self,

@@ -201,7 +201,8 @@ def main() -> None:
         lambda_bert=cfg.lambda_bert,
         lambda_gate=cfg.lambda_gate,
         label_smoothing=cfg.label_smoothing,
-        gate_threshold=cfg.gate_threshold,
+        gate_threshold_low=cfg.gate_threshold_low,
+        gate_threshold_high=cfg.gate_threshold_high,
     )
 
     # ── Trainer ───────────────────────────────────────────────────────────
