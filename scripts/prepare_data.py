@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Tuple
 # Allow running from the project root without installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.preprocessing import TextCleaner, KeywordProcessor
+from src.data.preprocessing import TextCleaner, AbstractRemover, KeywordProcessor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,8 +114,13 @@ def main() -> None:
     parser.add_argument("--val_ratio",       type=float, default=0.10)
     parser.add_argument("--test_ratio",      type=float, default=0.10)
     parser.add_argument("--seed",            type=int, default=42)
+    parser.add_argument("--no-strip-abstract", action="store_true", default=False,
+                        help="Do NOT remove the abstract from source text. "
+                             "By default the abstract is stripped so that the "
+                             "model cannot learn a trivial copy strategy.")
     args = parser.parse_args()
 
+    strip_abstract = not args.no_strip_abstract
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -128,9 +133,16 @@ def main() -> None:
 
     # ── Preprocess & filter ─────────────────────────────────────────────
     cleaner = TextCleaner(remove_service_markers=True)
+    abs_remover = AbstractRemover() if strip_abstract else None
     kw_proc = KeywordProcessor()
     records: List[Dict[str, Any]] = []
     skipped: Counter = Counter()
+    abstract_removed_count = 0
+
+    if strip_abstract:
+        logger.info("Abstract stripping is ENABLED")
+    else:
+        logger.info("Abstract stripping is DISABLED (--no-strip-abstract)")
 
     for rec in raw_data:
         # ── Validate required fields ────────────────────────────────────
@@ -158,11 +170,21 @@ def main() -> None:
             skipped["empty_keywords"] += 1
             continue
 
+        # ── Clean text ────────────────────────────────────────────────────
+        cleaned = cleaner.clean(text)
+
+        # ── Strip abstract from source ────────────────────────────────────
+        if abs_remover is not None:
+            cleaned_before = len(cleaned)
+            cleaned = abs_remover.remove(cleaned, summary)
+            if len(cleaned) < cleaned_before:
+                abstract_removed_count += 1
+
         # ── Build processed record ──────────────────────────────────────
         records.append({
             "doc_id":              rec.get("doc_id", ""),
             "title":               rec.get("title", ""),
-            "text_clean":          cleaner.clean(text),
+            "text_clean":          cleaned,
             "keywords_processed":  kws,
             "summary":             summary,
             "summary_bucket":      _summary_bucket(len(summary)),
@@ -172,6 +194,12 @@ def main() -> None:
         "After filtering: %d records kept, %d skipped %s",
         len(records), sum(skipped.values()), dict(skipped),
     )
+    if strip_abstract:
+        logger.info(
+            "Abstract removed from %d / %d records (%.1f%%)",
+            abstract_removed_count, len(records),
+            100.0 * abstract_removed_count / max(1, len(records)),
+        )
 
     # ── Split ────────────────────────────────────────────────────────────
     logger.info(
@@ -198,6 +226,8 @@ def main() -> None:
         "total_loaded": len(raw_data),
         "total_valid":  len(records),
         "skipped":      dict(skipped),
+        "abstract_stripped": strip_abstract,
+        "abstract_removed_count": abstract_removed_count if strip_abstract else 0,
         "splits": {
             name: {
                 "count": len(data),
