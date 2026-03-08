@@ -5,6 +5,10 @@ pytest tests/test_phase2.py tests/test_phase3.py -v
 
 Разбиение данные на выборки
 ```bash
+# 1. Проверить качество удаления на 20 записях
+python scripts/verify_abstract_removal.py --input dataset/dataset-SM-17k.json --n 20
+
+# 2. Разбиение набора данных на обучающую, валидационную и тестовую выборки 80:10:10
 python scripts/prepare_data.py --input dataset/dataset-SM-17k.json --output dataset/splits --min_summary_len 100 --val_ratio 0.10 --test_ratio 0.10 --seed 42
 ```
 
@@ -28,15 +32,26 @@ torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml
 torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml --stage 2 --resume checkpoints/gazeta_2stage/best.pt
 ```
 
-Tensorboard с прокинутыми портами на `6006`
+Tensorboard с прокинутым портом на `6006`
 ```bash
 tensorboard --logdir checkpoints/gazeta_2stage/logs/tensorboard --port=6006 --bind_al
 ```
 
+Валидация на примераз из тестовой выборки
 ```bash
 # Генерация 20 примеров из val-набора (можно запустить локально на GPU)
 python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 20
 
 # Или на CPU (медленнее, но без GPU)
 python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 5 --device cpu
+
+# Тест на 480 отдельных статьях
+python scripts/generate_samples_480.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --dataset dataset/dataset-480.json --n 15 --output results/samples_480.json
+```
+
+
+Диагностика неполадок
+```bash
+# Диагностический тест без KAL (на локальной машине с GPU)
+python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 10 --seed 42 --bypass-kal
 ```
