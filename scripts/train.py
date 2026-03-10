@@ -200,6 +200,7 @@ def main() -> None:
         lambda_cover=cfg.lambda_cover,
         lambda_bert=cfg.lambda_bert,
         lambda_gate=cfg.lambda_gate,
+        lambda_kw=cfg.lambda_kw,
         label_smoothing=cfg.label_smoothing,
         gate_threshold_low=cfg.gate_threshold_low,
         gate_threshold_high=cfg.gate_threshold_high,

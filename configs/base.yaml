@@ -37,13 +37,14 @@ training:
   seed:                 42
 
 loss:
-  lambda_gen:           0.65
+  lambda_gen:           0.50
   lambda_cover:         0.15
-  lambda_bert:          0.15
-  lambda_gate:          0.05
+  lambda_bert:          0.10
+  lambda_gate:          0.10
+  lambda_kw:            0.15
   label_smoothing:      0.1
   gate_threshold_low:   0.2
-  gate_threshold_high:  0.5
+  gate_threshold_high:  0.4
 
 data:
   train_path:  "dataset/splits/train.json"

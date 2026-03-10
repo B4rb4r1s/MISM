@@ -55,13 +55,14 @@ class MISMConfig:
     seed:                 int   = 42
 
     # ── Loss weights ──────────────────────────────────────────────────
-    lambda_gen:           float = 0.65
+    lambda_gen:           float = 0.50
     lambda_cover:         float = 0.15
-    lambda_bert:          float = 0.15
-    lambda_gate:          float = 0.05
+    lambda_bert:          float = 0.10
+    lambda_gate:          float = 0.10
+    lambda_kw:            float = 0.15
     label_smoothing:      float = 0.1
     gate_threshold_low:   float = 0.2
-    gate_threshold_high:  float = 0.5
+    gate_threshold_high:  float = 0.4
 
     # ── Data paths ────────────────────────────────────────────────────
     train_path:           str   = "dataset/splits/train.json"

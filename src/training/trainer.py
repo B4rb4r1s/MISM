@@ -335,18 +335,21 @@ class MISMTrainer:
                 kw_mask=batch["kw_mask"],
                 fusion_gate_values=output.fusion_gate_values,
                 kal_gate_values=output.kal_gate_values,
+                kw_input_ids=batch.get("kw_input_ids"),
             )
 
             # ── NaN / Inf guard ───────────────────────────────────────
             if not total_loss.isfinite():
                 logger.error(
                     "Non-finite loss (%.6g) at step %d epoch %d batch %d — "
-                    "components: l_gen=%.4g l_cover=%.4g l_bert=%.4g l_gate=%.4g",
+                    "components: l_gen=%.4g l_cover=%.4g l_bert=%.4g "
+                    "l_gate=%.4g l_kw=%.4g",
                     total_loss.item(), self.global_step, epoch, batch_idx,
                     components.get("l_gen",   float("nan")),
                     components.get("l_cover", float("nan")),
                     components.get("l_bert",  float("nan")),
                     components.get("l_gate",  float("nan")),
+                    components.get("l_kw",    float("nan")),
                 )
                 for _name, _t in [
                     ("logits",             output.logits),
@@ -456,6 +459,7 @@ class MISMTrainer:
                 kw_mask=batch["kw_mask"],
                 fusion_gate_values=output.fusion_gate_values,
                 kal_gate_values=output.kal_gate_values,
+                kw_input_ids=batch.get("kw_input_ids"),
             )
             for k, v in components.items():
                 accum[k] += v

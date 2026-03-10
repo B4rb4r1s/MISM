@@ -6,6 +6,8 @@ checkpoints
 
 *.db
 *.json
+*.tar*
+*.log
 
 dataset
 documentation

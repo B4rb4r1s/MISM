@@ -1,18 +1,19 @@
 """
 composite_loss.py — Composite loss for the Dual-Encoder Summarizer.
 
-Four components
+Five components
 ---------------
-L_gen   (λ=0.65) : Cross-entropy with label smoothing.
+L_gen   (λ=0.50) : Cross-entropy with label smoothing.
 L_cover (λ=0.15) : Keyword coverage — MSE between time-averaged
                    decoder→keyword attention and normalised target KW scores.
-L_bert  (λ=0.15) : Soft BERTScore in T5 embedding space
+L_bert  (λ=0.10) : Soft BERTScore in T5 embedding space
                    (fully differentiable, no external model).
-L_gate  (λ=0.05) : Hinge loss that penalises under-active gate values.
+L_gate  (λ=0.10) : Bilateral hinge loss on gate values.
+L_kw    (λ=0.15) : Keyword presence — rewards generating tokens from keywords.
 
 Total
 -----
-L = λ_gen·L_gen + λ_cover·L_cover + λ_bert·L_bert + λ_gate·L_gate
+L = λ_gen·L_gen + λ_cover·L_cover + λ_bert·L_bert + λ_gate·L_gate + λ_kw·L_kw
 """
 
 from __future__ import annotations
@@ -215,7 +216,84 @@ class SoftBERTScoreLoss(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. Gate loss  (hinge: penalise under-active gates)
+# 4. Keyword presence loss  (token-level boost)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class KeywordPresenceLoss(nn.Module):
+    """Reward the model for assigning high probability to keyword tokens.
+
+    For each sample in the batch:
+      1. Collect unique sub-word token ids from all real keywords.
+      2. For each valid decoder position, gather log P(kw_token).
+      3. For each keyword token, take the *max* log-prob across all
+         decoder positions (= best chance the model has to produce it).
+      4. Loss = negative mean of these best log-probs.
+
+    Intuition: if the model assigns high probability to a keyword token
+    at *any* position in the output, L_kw decreases.
+
+    Parameters
+    ----------
+    ignore_index : int — label pad value to exclude (default -100).
+    min_token_id : int — skip special token ids below this threshold
+                   (default 3 — excludes pad=0, eos=1, unk=2).
+    """
+
+    def __init__(
+        self,
+        ignore_index: int = -100,
+        min_token_id: int = 3,
+    ) -> None:
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.min_token_id = min_token_id
+
+    def forward(
+        self,
+        logits:       torch.Tensor,   # [B, T, V]
+        kw_input_ids: torch.Tensor,   # [B, K, L_kw]
+        kw_mask:      torch.Tensor,   # [B, K]  bool  True=real KW
+        labels:       torch.Tensor,   # [B, T]
+    ) -> torch.Tensor:
+        """
+        Returns
+        -------
+        Scalar keyword presence loss.
+        """
+        B, T, V = logits.shape
+        device  = logits.device
+        log_probs = F.log_softmax(logits.float(), dim=-1)   # [B, T, V]
+
+        tok_valid = (labels != self.ignore_index)            # [B, T]
+
+        losses: list[torch.Tensor] = []
+        for b in range(B):
+            # Collect unique keyword token ids
+            real_kw_ids = kw_input_ids[b][kw_mask[b]]        # [K_real, L_kw]
+            kw_tokens   = real_kw_ids.unique()
+            kw_tokens   = kw_tokens[kw_tokens >= self.min_token_id]
+
+            if kw_tokens.numel() == 0:
+                losses.append(torch.tensor(0.0, device=device))
+                continue
+
+            valid_pos = tok_valid[b]                          # [T]
+            if not valid_pos.any():
+                losses.append(torch.tensor(0.0, device=device))
+                continue
+
+            lp    = log_probs[b][valid_pos]                   # [T_valid, V]
+            kw_lp = lp[:, kw_tokens]                          # [T_valid, N_kw]
+
+            # Best log-prob across positions for each kw token
+            best_lp = kw_lp.max(dim=0).values                # [N_kw]
+            losses.append(-best_lp.mean())
+
+        return torch.stack(losses).mean()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. Gate loss  (hinge: penalise under-active gates)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class GateLoss(nn.Module):
@@ -269,35 +347,38 @@ class GateLoss(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. Composite loss
+# 6. Composite loss
 # ═══════════════════════════════════════════════════════════════════════════
 
 class CompositeLoss(nn.Module):
-    """Weighted sum of the four training objectives.
+    """Weighted sum of the five training objectives.
 
-    L = λ_gen·L_gen + λ_cover·L_cover + λ_bert·L_bert + λ_gate·L_gate
+    L = λ_gen·L_gen + λ_cover·L_cover + λ_bert·L_bert
+      + λ_gate·L_gate + λ_kw·L_kw
 
     Parameters
     ----------
-    lambda_gen     : float — weight for L_gen   (default 0.65).
+    lambda_gen     : float — weight for L_gen   (default 0.50).
     lambda_cover   : float — weight for L_cover (default 0.15).
-    lambda_bert    : float — weight for L_bert  (default 0.15).
-    lambda_gate    : float — weight for L_gate  (default 0.05).
+    lambda_bert    : float — weight for L_bert  (default 0.10).
+    lambda_gate    : float — weight for L_gate  (default 0.10).
+    lambda_kw      : float — weight for L_kw    (default 0.15).
     label_smoothing: float — smoothing for L_gen (default 0.1).
     gate_threshold_low  : float — min desired gate value (default 0.2).
-    gate_threshold_high : float — max desired gate value (default 0.5).
+    gate_threshold_high : float — max desired gate value (default 0.4).
     ignore_index   : int   — padding label id (default -100).
     """
 
     def __init__(
         self,
-        lambda_gen:          float = 0.65,
+        lambda_gen:          float = 0.50,
         lambda_cover:        float = 0.15,
-        lambda_bert:         float = 0.15,
-        lambda_gate:         float = 0.05,
+        lambda_bert:         float = 0.10,
+        lambda_gate:         float = 0.10,
+        lambda_kw:           float = 0.15,
         label_smoothing:     float = 0.1,
         gate_threshold_low:  float = 0.2,
-        gate_threshold_high: float = 0.5,
+        gate_threshold_high: float = 0.4,
         ignore_index:        int   = -100,
     ) -> None:
         super().__init__()
@@ -305,6 +386,7 @@ class CompositeLoss(nn.Module):
         self.lambda_cover = lambda_cover
         self.lambda_bert  = lambda_bert
         self.lambda_gate  = lambda_gate
+        self.lambda_kw    = lambda_kw
 
         self.gen_loss   = GenerativeLoss(
             label_smoothing=label_smoothing,
@@ -316,6 +398,7 @@ class CompositeLoss(nn.Module):
             threshold_low=gate_threshold_low,
             threshold_high=gate_threshold_high,
         )
+        self.kw_loss    = KeywordPresenceLoss(ignore_index=ignore_index)
 
     def forward(
         self,
@@ -327,12 +410,13 @@ class CompositeLoss(nn.Module):
         kw_mask:            torch.Tensor,          # [B, K]  bool
         fusion_gate_values: torch.Tensor,          # [B, L]
         kal_gate_values:    Optional[torch.Tensor] = None,  # [B, T]
+        kw_input_ids:       Optional[torch.Tensor] = None,  # [B, K, L_kw]
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Returns
         -------
         total_loss : scalar Tensor (differentiable)
-        components : dict with keys 'l_gen', 'l_cover', 'l_bert', 'l_gate'
+        components : dict with keys 'l_gen', 'l_cover', 'l_bert', 'l_gate', 'l_kw'
         """
         l_gen   = self.gen_loss(logits, labels)
         l_cover = self.cover_loss(kw_attn_weights, kw_scores, kw_mask, labels)
@@ -346,10 +430,18 @@ class CompositeLoss(nn.Module):
             + self.lambda_gate  * l_gate
         )
 
+        # ── Keyword presence loss (requires kw_input_ids) ────────────
+        if kw_input_ids is not None and self.lambda_kw > 0:
+            l_kw = self.kw_loss(logits, kw_input_ids, kw_mask, labels)
+            total = total + self.lambda_kw * l_kw
+        else:
+            l_kw = torch.tensor(0.0, device=logits.device)
+
         components: Dict[str, float] = {
             "l_gen":   l_gen.item(),
             "l_cover": l_cover.item(),
             "l_bert":  l_bert.item(),
             "l_gate":  l_gate.item(),
+            "l_kw":    l_kw.item(),
         }
         return total, components
