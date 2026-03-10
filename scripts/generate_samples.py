@@ -116,6 +116,30 @@ def parse_args() -> argparse.Namespace:
              "directly. Useful to verify that the encoder/decoder pipeline "
              "works correctly without KAL interference.",
     )
+
+    # ── Decoding parameters ─────────────────────────────────────────
+    p.add_argument(
+        "--num-beams", type=int, default=1,
+        help="Beam width for beam search (1 = greedy, default: 1)",
+    )
+    p.add_argument(
+        "--min-length", type=int, default=0,
+        help="Suppress EOS before this many tokens (default: 0)",
+    )
+    p.add_argument(
+        "--length-penalty", type=float, default=1.0,
+        help="Beam search length normalisation exponent "
+             "(>1 favours longer, default: 1.0)",
+    )
+    p.add_argument(
+        "--repetition-penalty", type=float, default=1.2,
+        help="Repetition penalty (>1 discourages repetition, default: 1.2)",
+    )
+    p.add_argument(
+        "--no-repeat-ngram-size", type=int, default=4,
+        help="Block repeated n-grams of this size (default: 4)",
+    )
+
     return p.parse_args()
 
 
@@ -214,6 +238,11 @@ def main() -> None:
             kw_scores=batch["kw_scores"],
             kw_mask=batch["kw_mask"],
             max_length=args.max_length,
+            min_length=args.min_length,
+            num_beams=args.num_beams,
+            length_penalty=args.length_penalty,
+            repetition_penalty=args.repetition_penalty,
+            no_repeat_ngram_size=args.no_repeat_ngram_size,
             bypass_kal=args.bypass_kal,
         )
 

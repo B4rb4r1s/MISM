@@ -378,18 +378,25 @@ class DualEncoderSummarizer(nn.Module):
         kw_scores:             torch.Tensor,   # [B, K]
         kw_mask:               torch.Tensor,   # [B, K]
         max_length:            int   = 256,
+        min_length:            int   = 0,
+        num_beams:             int   = 1,
+        length_penalty:        float = 1.0,
         repetition_penalty:    float = 1.2,
-        no_repeat_ngram_size:  int   = 3,
+        no_repeat_ngram_size:  int   = 4,
         eos_token_id:          int   = 1,
         bypass_kal:            bool  = False,
     ) -> torch.Tensor:
-        """Greedy autoregressive decoding with KV cache.
+        """Autoregressive decoding with greedy or beam search.
 
         Parameters
         ----------
         max_length            : maximum number of generated tokens.
+        min_length            : suppress EOS before this many tokens (default 0).
+        num_beams             : beam width (1 = greedy, >1 = beam search).
+        length_penalty        : beam search length normalisation exponent
+                                (>1 favours longer sequences, default 1.0).
         repetition_penalty    : > 1.0 discourages repetition.
-        no_repeat_ngram_size  : ban n-grams that already appeared.
+        no_repeat_ngram_size  : ban n-grams that already appeared (default 4).
         eos_token_id          : end-of-sequence token id (default 1 for T5).
         bypass_kal            : if True, skip KAL and project decoder hidden
                                 states to vocabulary directly via lm_head
@@ -413,20 +420,65 @@ class DualEncoderSummarizer(nn.Module):
             full_sequence, window_attention_mask, kw_embs, kw_mask,
         )
 
+        if num_beams > 1:
+            return self._beam_search(
+                encoder_hs=encoder_hs,
+                encoder_mask=encoder_mask,
+                kw_embs=kw_embs,
+                kw_mask=kw_mask,
+                kw_scores=kw_scores,
+                max_length=max_length,
+                min_length=min_length,
+                num_beams=num_beams,
+                length_penalty=length_penalty,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+                eos_token_id=eos_token_id,
+                bypass_kal=bypass_kal,
+            )
+
+        return self._greedy_search(
+            encoder_hs=encoder_hs,
+            encoder_mask=encoder_mask,
+            kw_embs=kw_embs,
+            kw_mask=kw_mask,
+            kw_scores=kw_scores,
+            max_length=max_length,
+            min_length=min_length,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            eos_token_id=eos_token_id,
+            bypass_kal=bypass_kal,
+        )
+
+    # ------------------------------------------------------------------
+    # Greedy search (original logic + min_length)
+    # ------------------------------------------------------------------
+
+    def _greedy_search(
+        self,
+        encoder_hs:           torch.Tensor,
+        encoder_mask:         torch.Tensor,
+        kw_embs:              torch.Tensor,
+        kw_mask:              torch.Tensor,
+        kw_scores:            torch.Tensor,
+        max_length:           int,
+        min_length:           int,
+        repetition_penalty:   float,
+        no_repeat_ngram_size: int,
+        eos_token_id:         int,
+        bypass_kal:           bool,
+    ) -> torch.Tensor:
         B      = encoder_hs.size(0)
         device = encoder_hs.device
-
-        # ── T5 lm_head scaling (for bypass_kal mode) ──────────────────
-        # Replicate the same scaling T5ForConditionalGeneration applies.
         _bypass_scale = (self._model_dim ** -0.5) if self._tie_word_embeddings else 1.0
 
-        # ── 4.  Autoregressive decode ──────────────────────────────────
         generated = torch.full(
             (B, 1), self.decoder_start_token_id,
             dtype=torch.long, device=device,
         )
-        finished         = torch.zeros(B, dtype=torch.bool, device=device)
-        past_key_values  = None
+        finished        = torch.zeros(B, dtype=torch.bool, device=device)
+        past_key_values = None
 
         for step in range(max_length):
             dec_input = generated if step == 0 else generated[:, -1:]
@@ -443,7 +495,6 @@ class DualEncoderSummarizer(nn.Module):
             dec_hidden = decoder_out.last_hidden_state       # [B, 1, D]
 
             if bypass_kal:
-                # Diagnostic: use T5 decoder → lm_head directly (no KAL)
                 next_logits = self.lm_head(
                     dec_hidden * _bypass_scale
                 )[:, -1, :]                                  # [B, V]
@@ -452,6 +503,10 @@ class DualEncoderSummarizer(nn.Module):
                     dec_hidden, kw_embs, kw_mask, kw_scores,
                 )
                 next_logits = logits[:, -1, :]               # [B, V]
+
+            # ── min_length: suppress EOS before min_length tokens ──
+            if step < min_length:
+                next_logits[:, eos_token_id] = float("-inf")
 
             # ── Repetition penalty ─────────────────────────────────
             if repetition_penalty != 1.0:
@@ -481,6 +536,241 @@ class DualEncoderSummarizer(nn.Module):
                 break
 
         return generated
+
+    # ------------------------------------------------------------------
+    # Beam search
+    # ------------------------------------------------------------------
+
+    def _beam_search(
+        self,
+        encoder_hs:           torch.Tensor,   # [B, L+K, D]
+        encoder_mask:         torch.Tensor,   # [B, L+K]
+        kw_embs:              torch.Tensor,   # [B, K, D]
+        kw_mask:              torch.Tensor,   # [B, K]
+        kw_scores:            torch.Tensor,   # [B, K]
+        max_length:           int,
+        min_length:           int,
+        num_beams:            int,
+        length_penalty:       float,
+        repetition_penalty:   float,
+        no_repeat_ngram_size: int,
+        eos_token_id:         int,
+        bypass_kal:           bool,
+    ) -> torch.Tensor:
+        """Beam search decoding with length normalisation.
+
+        For each batch element, maintains ``num_beams`` hypotheses in parallel.
+        Finished hypotheses are scored as  ``log_prob_sum / length^length_penalty``
+        and the best one is returned.
+        """
+        B      = encoder_hs.size(0)
+        device = encoder_hs.device
+        NB     = num_beams
+        _bypass_scale = (self._model_dim ** -0.5) if self._tie_word_embeddings else 1.0
+
+        # ── Expand encoder outputs for beams ──────────────────────────
+        # [B, ...] → [B*NB, ...]
+        encoder_hs   = encoder_hs.repeat_interleave(NB, dim=0)    # [B*NB, L+K, D]
+        encoder_mask = encoder_mask.repeat_interleave(NB, dim=0)  # [B*NB, L+K]
+        kw_embs      = kw_embs.repeat_interleave(NB, dim=0)      # [B*NB, K, D]
+        kw_mask      = kw_mask.repeat_interleave(NB, dim=0)      # [B*NB, K]
+        kw_scores_ex = kw_scores.repeat_interleave(NB, dim=0)    # [B*NB, K]
+
+        # ── Per-beam state ────────────────────────────────────────────
+        # generated: [B*NB, 1] — starts with decoder_start_token
+        generated = torch.full(
+            (B * NB, 1), self.decoder_start_token_id,
+            dtype=torch.long, device=device,
+        )
+        beam_scores  = torch.zeros(B * NB, device=device)    # log-prob sums
+        # Only first beam per batch should be active initially;
+        # fill others with -inf so they don't compete at step 0.
+        beam_scores[1::NB] = float("-inf")
+        if NB > 2:
+            for i in range(2, NB):
+                beam_scores[i::NB] = float("-inf")
+
+        finished_beams: list[list[tuple[torch.Tensor, float]]] = [
+            [] for _ in range(B)
+        ]  # per-batch list of (token_ids, normalised_score)
+
+        past_key_values = None
+
+        for step in range(max_length):
+            dec_input = generated if step == 0 else generated[:, -1:]
+
+            decoder_out = self.decoder(
+                input_ids=dec_input,
+                encoder_hidden_states=encoder_hs,
+                encoder_attention_mask=encoder_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_key_values = decoder_out.past_key_values
+            dec_hidden = decoder_out.last_hidden_state       # [B*NB, 1, D]
+
+            if bypass_kal:
+                next_logits = self.lm_head(
+                    dec_hidden * _bypass_scale
+                )[:, -1, :]                                  # [B*NB, V]
+            else:
+                logits, _, _ = self.keyword_attention_layer(
+                    dec_hidden, kw_embs, kw_mask, kw_scores_ex,
+                )
+                next_logits = logits[:, -1, :]               # [B*NB, V]
+
+            V = next_logits.size(-1)
+
+            # ── min_length: suppress EOS ──────────────────────────
+            if step < min_length:
+                next_logits[:, eos_token_id] = float("-inf")
+
+            # ── Repetition penalty (per beam) ─────────────────────
+            if repetition_penalty != 1.0:
+                for idx in range(B * NB):
+                    prev = generated[idx].unique()
+                    pos = next_logits[idx, prev] > 0
+                    next_logits[idx, prev[pos]]  /= repetition_penalty
+                    next_logits[idx, prev[~pos]] *= repetition_penalty
+
+            # ── No-repeat n-gram blocking (per beam) ──────────────
+            if no_repeat_ngram_size > 0 and generated.size(1) >= no_repeat_ngram_size:
+                n = no_repeat_ngram_size
+                for idx in range(B * NB):
+                    tokens = generated[idx].tolist()
+                    prefix = tuple(tokens[-(n - 1):])
+                    for i in range(len(tokens) - n + 1):
+                        if tuple(tokens[i : i + n - 1]) == prefix:
+                            next_logits[idx, tokens[i + n - 1]] = float("-inf")
+
+            # ── Log-softmax scores ────────────────────────────────
+            log_probs = torch.nn.functional.log_softmax(next_logits, dim=-1)  # [B*NB, V]
+
+            # Combine with accumulated beam scores
+            # [B*NB, V] = beam_scores[:, None] + log_probs
+            candidate_scores = beam_scores.unsqueeze(1) + log_probs  # [B*NB, V]
+
+            # ── Reshape to [B, NB*V] for top-k selection ──────────
+            candidate_scores = candidate_scores.view(B, NB * V)
+
+            # Select top 2*NB candidates per batch element
+            topk_scores, topk_indices = candidate_scores.topk(
+                2 * NB, dim=-1, largest=True, sorted=True,
+            )  # [B, 2*NB]
+
+            # Decode beam and token indices
+            topk_beam_idx  = topk_indices // V  # which beam [0..NB-1]
+            topk_token_idx = topk_indices % V   # which token [0..V-1]
+
+            # ── Build next beams ──────────────────────────────────
+            new_generated   = []
+            new_beam_scores = []
+            new_past_beams  = []   # track which beam in B*NB each new beam came from
+
+            all_done = True
+
+            for b in range(B):
+                beams_for_b = []
+                for rank in range(2 * NB):
+                    if len(beams_for_b) >= NB:
+                        break
+
+                    local_beam = topk_beam_idx[b, rank].item()
+                    token      = topk_token_idx[b, rank].item()
+                    score      = topk_scores[b, rank].item()
+                    global_idx = b * NB + local_beam
+
+                    if token == eos_token_id:
+                        # Finished beam — compute normalised score
+                        seq_len = generated.size(1)  # tokens so far (excl. this EOS)
+                        norm_score = score / ((seq_len + 1) ** length_penalty)
+                        finished_beams[b].append(
+                            (generated[global_idx].clone(), norm_score)
+                        )
+                        continue
+
+                    beams_for_b.append((global_idx, token, score))
+
+                # Pad with dummy beams if needed (shouldn't happen often)
+                while len(beams_for_b) < NB:
+                    # Reuse last valid beam with very low score
+                    g_idx = b * NB
+                    beams_for_b.append((g_idx, self.pad_token_id, float("-inf")))
+
+                for g_idx, token, score in beams_for_b:
+                    new_past_beams.append(g_idx)
+                    new_beam_scores.append(score)
+                    new_row = torch.cat([
+                        generated[g_idx],
+                        torch.tensor([token], device=device, dtype=torch.long),
+                    ])
+                    new_generated.append(new_row)
+
+                # Check if enough finished beams
+                if len(finished_beams[b]) < NB:
+                    all_done = False
+
+            # ── Update state ──────────────────────────────────────
+            generated   = torch.stack(new_generated, dim=0)             # [B*NB, T+1]
+            beam_scores = torch.tensor(new_beam_scores, device=device)  # [B*NB]
+
+            # Reorder KV cache to match new beam order
+            reorder_idx = torch.tensor(new_past_beams, device=device, dtype=torch.long)
+            past_key_values = self._reorder_cache(past_key_values, reorder_idx)
+
+            if all_done:
+                break
+
+        # ── Select best hypothesis per batch element ──────────────────
+        results = []
+        for b in range(B):
+            # Add still-active beams as candidates
+            for beam_i in range(NB):
+                g_idx = b * NB + beam_i
+                seq_len = generated.size(1)
+                norm_score = beam_scores[g_idx].item() / (seq_len ** length_penalty)
+                finished_beams[b].append(
+                    (generated[g_idx].clone(), norm_score)
+                )
+
+            # Select best
+            best_seq, best_score = max(finished_beams[b], key=lambda x: x[1])
+            results.append(best_seq)
+
+        # ── Pad to equal length ───────────────────────────────────────
+        max_len = max(r.size(0) for r in results)
+        padded  = torch.full(
+            (B, max_len), self.pad_token_id,
+            dtype=torch.long, device=device,
+        )
+        for b, seq in enumerate(results):
+            padded[b, :seq.size(0)] = seq
+
+        return padded
+
+    @staticmethod
+    def _reorder_cache(
+        past_key_values,
+        beam_idx: torch.Tensor,
+    ):
+        """Reorder KV cache to match reordered beams.
+
+        Supports both ``DynamicCache`` (transformers ≥ 4.36) and
+        the legacy tuple-of-tuples format.
+        """
+        # DynamicCache — has an in-place reorder method
+        if hasattr(past_key_values, "reorder_cache"):
+            past_key_values.reorder_cache(beam_idx)
+            return past_key_values
+
+        # Legacy tuple format
+        reordered = []
+        for layer_past in past_key_values:
+            reordered.append(
+                tuple(state.index_select(0, beam_idx) for state in layer_past)
+            )
+        return tuple(reordered)
 
     # ------------------------------------------------------------------
     # Debug helper
