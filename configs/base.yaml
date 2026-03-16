@@ -4,10 +4,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 model:
-  model_name:          "IlyaGusev/rut5_base_sum_gazeta"
-  hidden_size:         768
-  num_heads:           12
-  ffn_dim:             3072
+  model_name:          "ai-forever/FRED-T5-1.7B"
+  # hidden_size, num_heads, ffn_dim are auto-inferred from the T5 backbone.
+  # For FRED-T5-1.7B: d_model=1536, num_heads=24, d_ff=4096
   dropout:             0.1
   window_size:         512
   window_overlap:      128
@@ -27,8 +26,8 @@ training:
   stage2_lr:            5.0e-5
 
   # Per-GPU batch size  (effective = batch_size × grad_accum_steps × world_size)
-  batch_size:           4
-  grad_accum_steps:     8       # effective batch ≈ 4 × 8 × 8 GPUs = 256
+  batch_size:           2
+  grad_accum_steps:     16      # effective batch ≈ 2 × 16 × 8 GPUs = 256
   max_grad_norm:        1.0
   warmup_ratio:         0.05
   weight_decay:         0.01

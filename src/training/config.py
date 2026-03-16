@@ -23,10 +23,9 @@ import yaml
 @dataclass
 class MISMConfig:
     # ── Model architecture ────────────────────────────────────────────
-    model_name:           str   = "IlyaGusev/rut5_base_sum_gazeta"
-    hidden_size:          int   = 768
-    num_heads:            int   = 12
-    ffn_dim:              int   = 3072
+    model_name:           str   = "ai-forever/FRED-T5-1.7B"
+    # hidden_size, num_heads, ffn_dim are auto-inferred from the T5
+    # backbone config in DualEncoderSummarizer.from_pretrained().
     dropout:              float = 0.1
     window_size:          int   = 512
     window_overlap:       int   = 128

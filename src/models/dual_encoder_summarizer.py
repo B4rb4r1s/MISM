@@ -30,7 +30,7 @@ decoder_hidden   [B, T, D]   last decoder layer hidden states (for L_bert)
 Classmethod
 -----------
 DualEncoderSummarizer.from_pretrained(model_name, **kwargs)
-    Load from a HuggingFace T5/T5-based model (e.g. rut5_base_sum_gazeta).
+    Load from a HuggingFace T5-based model (e.g. ai-forever/FRED-T5-1.7B).
 """
 
 from __future__ import annotations
@@ -209,9 +209,15 @@ class DualEncoderSummarizer(nn.Module):
     ) -> "DualEncoderSummarizer":
         """Load from a HuggingFace T5 checkpoint.
 
-        Typical usage (GAZETA_2STAGE strategy):
+        All architecture dimensions (hidden_size, num_heads, ffn_dim) are
+        **auto-inferred** from the T5 config by default.  This means
+        switching the backbone (e.g. ``ruT5-base`` → ``FRED-T5-1.7B``)
+        requires only changing the model name — no manual dimension tweaking.
+
+        Typical usage::
+
             model = DualEncoderSummarizer.from_pretrained(
-                "IlyaGusev/rut5_base_sum_gazeta",
+                "ai-forever/FRED-T5-1.7B",
                 max_src_len=4096,
             )
 
@@ -220,15 +226,40 @@ class DualEncoderSummarizer(nn.Module):
         pretrained_model_name_or_path : str
             HuggingFace model name or local path.
         **kwargs
-            Extra keyword arguments forwarded to the DualEncoderSummarizer
-            constructor (e.g. ``max_src_len``, ``dropout``).
+            Extra keyword arguments forwarded to the constructor
+            (e.g. ``max_src_len``, ``dropout``).  Dimension kwargs
+            (``hidden_size``, ``*_num_heads``, ``*_ffn_dim``) may be
+            passed to override auto-inference.
         """
         logger.info("Loading backbone: %s", pretrained_model_name_or_path)
         t5_model = T5ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path,
         )
-        # Allow caller to override hidden_size; fall back to model config.
-        hidden_size = kwargs.pop("hidden_size", t5_model.config.d_model)
+        t5_cfg = t5_model.config
+
+        # ── Auto-infer dimensions from backbone config ──────────────
+        hidden_size = kwargs.pop("hidden_size", t5_cfg.d_model)
+        num_heads   = kwargs.pop("num_heads",   t5_cfg.num_heads)
+        ffn_dim     = kwargs.pop("ffn_dim",     t5_cfg.d_ff)
+
+        logger.info(
+            "Auto-inferred dims: d_model=%d, num_heads=%d, d_ff=%d, "
+            "vocab=%d, tie_emb=%s",
+            hidden_size, num_heads, ffn_dim,
+            t5_cfg.vocab_size, t5_cfg.tie_word_embeddings,
+        )
+
+        # Apply to all custom sub-modules; individual overrides win.
+        kwargs.setdefault("kw_num_heads",     num_heads)
+        kwargs.setdefault("kw_ffn_dim",       ffn_dim)
+        kwargs.setdefault("doc_num_heads",    num_heads)
+        kwargs.setdefault("doc_ffn_dim",      ffn_dim)
+        kwargs.setdefault("fusion_num_heads", num_heads)
+        kwargs.setdefault("fusion_ffn_dim",   ffn_dim)
+        # KAL is intentionally smaller (half heads, half FFN)
+        kwargs.setdefault("kal_num_heads",    max(num_heads // 2, 1))
+        kwargs.setdefault("kal_ffn_dim",      ffn_dim // 2)
+
         return cls(t5_model=t5_model, hidden_size=hidden_size, **kwargs)
 
     # ------------------------------------------------------------------

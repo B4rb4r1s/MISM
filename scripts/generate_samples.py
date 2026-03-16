@@ -167,6 +167,8 @@ def main() -> None:
 
     # ── Tokeniser ─────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     # ── Dataset ───────────────────────────────────────────────────────
     split_path = {
@@ -198,7 +200,6 @@ def main() -> None:
     logger.info("Loading model: %s", cfg.model_name)
     model = DualEncoderSummarizer.from_pretrained(
         cfg.model_name,
-        hidden_size=cfg.hidden_size,
         window_overlap=cfg.window_overlap,
         max_src_len=cfg.max_src_len,
         dropout=cfg.dropout,

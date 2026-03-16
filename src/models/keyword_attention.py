@@ -39,7 +39,7 @@ class KeywordAttentionLayer(nn.Module):
     hidden_size  : int — d_model (default 768).
     num_heads    : int — attention heads (default 8).
     ffn_dim      : int — inner FFN dimension (default 1536).
-    vocab_size   : int — vocabulary size (default 32128 for ruT5-base).
+    vocab_size   : int — vocabulary size (overridden by backbone config).
     dropout      : float — dropout probability (default 0.1).
     """
 

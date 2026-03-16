@@ -159,6 +159,10 @@ def main() -> None:
 
     # ── Tokeniser ─────────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    # FRED-T5 uses a GPT2-style tokenizer that may lack a pad token.
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        logger.info("Set pad_token = eos_token (%s)", tokenizer.eos_token)
 
     # ── Datasets ──────────────────────────────────────────────────────────
     train_dataset = SummarizationDataset.from_json(cfg.train_path)
@@ -169,9 +173,10 @@ def main() -> None:
                     len(train_dataset), len(val_dataset))
 
     # ── Model ─────────────────────────────────────────────────────────────
+    # Dimensions (hidden_size, num_heads, ffn_dim) are auto-inferred from
+    # the T5 backbone config — only non-architecture kwargs are passed.
     model = DualEncoderSummarizer.from_pretrained(
         cfg.model_name,
-        hidden_size=cfg.hidden_size,
         window_overlap=cfg.window_overlap,
         max_src_len=cfg.max_src_len,
         dropout=cfg.dropout,

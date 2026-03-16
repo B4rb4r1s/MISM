@@ -86,7 +86,6 @@ def main() -> None:
     from src.models.dual_encoder_summarizer import DualEncoderSummarizer
     model = DualEncoderSummarizer.from_pretrained(
         cfg.model_name,
-        hidden_size=cfg.hidden_size,
         window_overlap=cfg.window_overlap,
         max_src_len=cfg.max_src_len,
         dropout=cfg.dropout,
