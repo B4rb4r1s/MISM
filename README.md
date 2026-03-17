@@ -55,3 +55,9 @@ python scripts/generate_samples_480.py --config configs/gazeta_2stage.yaml --che
 # Диагностический тест без KAL (на локальной машине с GPU)
 python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 10 --seed 42 --bypass-kal
 ```
+
+
+Проверка установленных моделей в кэше
+```bash
+huggingface-cli scan-cache
+```
