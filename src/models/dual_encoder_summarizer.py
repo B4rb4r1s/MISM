@@ -234,6 +234,7 @@ class DualEncoderSummarizer(nn.Module):
         logger.info("Loading backbone: %s", pretrained_model_name_or_path)
         t5_model = T5ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path,
+            torch_dtype=torch.float32,   # ensure fp32 even if HF weights are bf16
         )
         t5_cfg = t5_model.config
 

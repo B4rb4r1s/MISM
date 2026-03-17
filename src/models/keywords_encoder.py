@@ -77,6 +77,13 @@ class KeywordsEncoder(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
 
+        # ── Zero-init residual branches → identity at start ─────────
+        nn.init.zeros_(self.self_attn.out_proj.weight)
+        nn.init.zeros_(self.self_attn.out_proj.bias)
+        last_linear = self.ffn[-1]
+        nn.init.zeros_(last_linear.weight)
+        nn.init.zeros_(last_linear.bias)
+
     # ------------------------------------------------------------------
 
     def forward(

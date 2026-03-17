@@ -91,6 +91,17 @@ class DocumentEncoder(nn.Module):
         self.window_norm2 = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
 
+        # ── Zero-init residual branches → identity at start ─────────
+        # Prevents random residuals from shifting pretrained encoder
+        # outputs, which would cause NaN in downstream layers with bf16.
+        nn.init.zeros_(self.window_self_attn.out_proj.weight)
+        nn.init.zeros_(self.window_self_attn.out_proj.bias)
+        nn.init.zeros_(self.window_cross_attn.out_proj.weight)
+        nn.init.zeros_(self.window_cross_attn.out_proj.bias)
+        last_linear = self.window_ffn[-1]
+        nn.init.zeros_(last_linear.weight)
+        nn.init.zeros_(last_linear.bias)
+
     # ------------------------------------------------------------------
 
     def forward(

@@ -94,6 +94,14 @@ class KeywordAttentionLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        # ── Zero-init residual branches → identity at start ─────────
+        # Prevents NaN when random KAL output feeds into lm_head with bf16.
+        nn.init.zeros_(self.kw_cross_attn.out_proj.weight)
+        nn.init.zeros_(self.kw_cross_attn.out_proj.bias)
+        last_linear = self.ffn[-1]  # last Linear in Sequential
+        nn.init.zeros_(last_linear.weight)
+        nn.init.zeros_(last_linear.bias)
+
     # ------------------------------------------------------------------
 
     def set_lm_head(self, lm_head: nn.Module) -> None:

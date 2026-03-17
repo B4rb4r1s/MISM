@@ -102,6 +102,23 @@ class FusionLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        # ── Zero-init: make FusionLayer start as identity ───────────
+        # All residual branches contribute ≈ 0 initially, so the merged
+        # sequence and keyword embeddings pass through unchanged.
+        # This prevents NaN/overflow when the randomly-initialised layer
+        # feeds into a frozen pretrained decoder (critical for bf16).
+        for attn in (self.doc_self_attn, self.doc_to_kw_attn, self.kw_to_doc_attn):
+            nn.init.zeros_(attn.out_proj.weight)
+            nn.init.zeros_(attn.out_proj.bias)
+        for ffn in (self.doc_ffn, self.kw_ffn):
+            # Last Linear in Sequential is the output projection
+            last_linear = ffn[-1]
+            nn.init.zeros_(last_linear.weight)
+            nn.init.zeros_(last_linear.bias)
+        # Gate bias → −2  so  sigmoid(−2) ≈ 0.12: mostly pass-through of
+        # original doc_ctx, gradually learning to blend in KW information.
+        nn.init.constant_(self.gate_proj.bias, -2.0)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
