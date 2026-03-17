@@ -31,7 +31,7 @@ training:
   max_grad_norm:        1.0
   warmup_ratio:         0.05
   weight_decay:         0.01
-  bf16:                 true
+  bf16:                 false
   gradient_checkpointing: true
   seed:                 42
 
