@@ -62,22 +62,19 @@ class FusionLayer(nn.Module):
             embed_dim=hidden_size, num_heads=num_heads,
             dropout=dropout, batch_first=True,
         )
-        self.doc_norm_sa = nn.LayerNorm(hidden_size)
+        # NOTE: No LayerNorm after residuals — with zero-init, pure residuals
+        # give exact identity, preserving pretrained encoder distribution.
 
         # ── Cross-attention: Doc → KW ─────────────────────────────────
         self.doc_to_kw_attn = nn.MultiheadAttention(
             embed_dim=hidden_size, num_heads=num_heads,
             dropout=dropout, batch_first=True,
         )
-        self.doc_norm_ca = nn.LayerNorm(hidden_size)
-
         # ── Cross-attention: KW → Doc ─────────────────────────────────
         self.kw_to_doc_attn = nn.MultiheadAttention(
             embed_dim=hidden_size, num_heads=num_heads,
             dropout=dropout, batch_first=True,
         )
-        self.kw_norm_ca = nn.LayerNorm(hidden_size)
-
         # ── Gated fusion (document side) ──────────────────────────────
         # Input: concat(doc_ctx, doc_enhanced) → [B, L, 2*D]
         self.gate_proj = nn.Linear(hidden_size * 2, hidden_size)
@@ -89,8 +86,6 @@ class FusionLayer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(ffn_dim, hidden_size),
         )
-        self.doc_norm_ffn = nn.LayerNorm(hidden_size)
-
         # ── FFN (keywords) ────────────────────────────────────────────
         self.kw_ffn = nn.Sequential(
             nn.Linear(hidden_size, ffn_dim),
@@ -98,8 +93,6 @@ class FusionLayer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(ffn_dim, hidden_size),
         )
-        self.kw_norm_ffn = nn.LayerNorm(hidden_size)
-
         self.dropout = nn.Dropout(dropout)
 
         # ── Zero-init: make FusionLayer start as identity ───────────
@@ -152,7 +145,7 @@ class FusionLayer(nn.Module):
             key_padding_mask=doc_pad,
         )
         sa_out = torch.nan_to_num(sa_out, nan=0.0)  # guard: all-pad row → NaN in softmax
-        doc_ctx = self.doc_norm_sa(doc_seq + self.dropout(sa_out))  # [B, L, D]
+        doc_ctx = doc_seq + self.dropout(sa_out)  # [B, L, D]  pure residual
 
         # ── 3a. Cross-attention: Doc → KW ─────────────────────────────
         #   Q = doc_ctx  [B, L, D]
@@ -164,7 +157,7 @@ class FusionLayer(nn.Module):
             key_padding_mask=kw_pad,
         )
         doc_enh = torch.nan_to_num(doc_enh, nan=0.0)  # guard: all-pad kw → NaN
-        doc_enhanced = self.doc_norm_ca(doc_ctx + self.dropout(doc_enh))  # [B, L, D]
+        doc_enhanced = doc_ctx + self.dropout(doc_enh)  # [B, L, D]  pure residual
 
         # ── 3b. Cross-attention: KW → Doc ─────────────────────────────
         #   Q = kw_embeddings  [B, K, D]
@@ -176,7 +169,7 @@ class FusionLayer(nn.Module):
             key_padding_mask=doc_pad,
         )
         kw_enh = torch.nan_to_num(kw_enh, nan=0.0)  # guard: all-pad doc → NaN
-        kw_enhanced = self.kw_norm_ca(kw_embeddings + self.dropout(kw_enh))  # [B, K, D]
+        kw_enhanced = kw_embeddings + self.dropout(kw_enh)  # [B, K, D]  pure residual
 
         # ── 4. Gated fusion (document) ────────────────────────────────
         gate_input = torch.cat([doc_ctx, doc_enhanced], dim=-1)  # [B, L, 2D]
@@ -185,14 +178,10 @@ class FusionLayer(nn.Module):
         gate_values = gate.mean(dim=-1)                            # [B, L]
 
         # ── 5. FFN (doc) ──────────────────────────────────────────────
-        doc_fused = self.doc_norm_ffn(
-            doc_fused + self.dropout(self.doc_ffn(doc_fused))
-        )                                                          # [B, L, D]
+        doc_fused = doc_fused + self.dropout(self.doc_ffn(doc_fused))  # [B, L, D]  pure residual
 
         # ── 6. FFN (kw) ───────────────────────────────────────────────
-        kw_fused = self.kw_norm_ffn(
-            kw_enhanced + self.dropout(self.kw_ffn(kw_enhanced))
-        )                                                          # [B, K, D]
+        kw_fused = kw_enhanced + self.dropout(self.kw_ffn(kw_enhanced))  # [B, K, D]  pure residual
 
         # ── 7. Concatenate doc and kw representations ─────────────────
         encoder_hidden_states  = torch.cat([doc_fused, kw_fused], dim=1)   # [B, L+K, D]

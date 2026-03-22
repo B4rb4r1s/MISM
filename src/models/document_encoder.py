@@ -70,7 +70,8 @@ class DocumentEncoder(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.window_norm1 = nn.LayerNorm(hidden_size)
+        # NOTE: No LayerNorm after residuals — with zero-init, pure residuals
+        # give exact identity, preserving pretrained T5 encoder output scale.
 
         # KW-guided cross-attention: kw_pooled queries the window sequence
         # to produce a relevance weight per window
@@ -88,7 +89,6 @@ class DocumentEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(ffn_dim, hidden_size),
         )
-        self.window_norm2 = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
 
         # ── Zero-init residual branches → identity at start ─────────
@@ -165,12 +165,10 @@ class DocumentEncoder(nn.Module):
             key_padding_mask=win_pad_mask,
         )
         attended = torch.nan_to_num(attended, nan=0.0)  # guard: all-pad → NaN in softmax
-        win_embs = self.window_norm1(win_embs + self.dropout(attended))  # [B, W, D]
+        win_embs = win_embs + self.dropout(attended)  # [B, W, D]  pure residual
 
         # Apply FFN on window representations
-        win_embs = self.window_norm2(
-            win_embs + self.dropout(self.window_ffn(win_embs))
-        )                                                   # [B, W, D]
+        win_embs = win_embs + self.dropout(self.window_ffn(win_embs))  # [B, W, D]  pure residual
 
         # ── 4. KW-guided cross-attention → window weights ─────────────
         #   Q = kw_pooled (one query per sample) [B, 1, D]

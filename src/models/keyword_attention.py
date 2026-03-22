@@ -61,7 +61,10 @@ class KeywordAttentionLayer(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.kw_norm = nn.LayerNorm(hidden_size)
+        # NOTE: No LayerNorm after cross-attention residual!
+        # With zero-init, cross_attn output = 0, so residual = identity.
+        # LayerNorm would re-normalise decoder_hidden, breaking pretrained
+        # lm_head's expected input distribution → CE ≫ log(V).
 
         # ── Gated fusion ──────────────────────────────────────────────
         # gate ∈ (0, 1)^D per (batch, position, dim)
@@ -79,7 +82,7 @@ class KeywordAttentionLayer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(ffn_dim, hidden_size),
         )
-        self.ffn_norm = nn.LayerNorm(hidden_size)
+        # NOTE: No LayerNorm after FFN residual (same reason as above).
 
         # ── LM Head — initialized to None; MUST be set before use ─────
         # The lm_head weights are shared with T5 (set via set_lm_head).
@@ -158,7 +161,7 @@ class KeywordAttentionLayer(nn.Module):
         # Guard: all-padding keyword sequence → softmax(-inf) = NaN
         kw_attended = torch.nan_to_num(kw_attended, nan=0.0)
         raw_attn    = torch.nan_to_num(raw_attn,    nan=0.0)
-        kw_attended = self.kw_norm(decoder_hidden + self.dropout(kw_attended))  # [B, T, D]
+        kw_attended = decoder_hidden + self.dropout(kw_attended)  # [B, T, D]  pure residual
 
         # ── Score-weighted attention (optional, improves focus on top KW) ──
         # Re-weight raw attention by kw_scores to amplify high-ranked KWs.
@@ -180,7 +183,7 @@ class KeywordAttentionLayer(nn.Module):
         gate_values = gate.mean(dim=-1)                                 # [B, T]
 
         # ── 3. FFN ────────────────────────────────────────────────────
-        enhanced = self.ffn_norm(enhanced + self.dropout(self.ffn(enhanced)))  # [B, T, D]
+        enhanced = enhanced + self.dropout(self.ffn(enhanced))  # [B, T, D]  pure residual
 
         # ── 4. LM Head (shared weights) ───────────────────────────────
         # Apply T5 scaling factor: when tie_word_embeddings=True, T5

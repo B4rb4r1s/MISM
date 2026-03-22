@@ -65,7 +65,11 @@ class KeywordsEncoder(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.norm1 = nn.LayerNorm(hidden_size)
+        # NOTE: No LayerNorm after residuals — with zero-init, pure residuals
+        # give exact identity, preserving pretrained T5 encoder output scale.
+        # LayerNorm would re-normalise from T5's natural scale (~0.01 std)
+        # to ~0.7 std, causing 70x scale mismatch with document tokens
+        # and breaking decoder cross-attention.
 
         # Position-wise FFN
         self.ffn = nn.Sequential(
@@ -74,7 +78,6 @@ class KeywordsEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(ffn_dim, hidden_size),
         )
-        self.norm2 = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
 
         # ── Zero-init residual branches → identity at start ─────────
@@ -144,10 +147,10 @@ class KeywordsEncoder(nn.Module):
         # NaN (softmax of all -inf).  Replace NaN with 0 so the residual path
         # simply passes through the original kw_embs unchanged.
         attended = torch.nan_to_num(attended, nan=0.0)
-        kw_embs = self.norm1(kw_embs + self.dropout(attended))   # [B, K, D]
+        kw_embs = kw_embs + self.dropout(attended)   # [B, K, D]  pure residual
 
         # ── 4. FFN ────────────────────────────────────────────────────
-        kw_embs = self.norm2(kw_embs + self.dropout(self.ffn(kw_embs)))  # [B, K, D]
+        kw_embs = kw_embs + self.dropout(self.ffn(kw_embs))  # [B, K, D]  pure residual
 
         # ── 5. Weighted pooling (by kw_scores, masked) ────────────────
         #   Set padding slots to -inf so softmax → 0.0
