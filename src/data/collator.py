@@ -23,6 +23,8 @@ labels                 [B, max_summary_tokens]      long  (-100 for padding)
 from __future__ import annotations
 
 import logging
+import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -31,6 +33,9 @@ from transformers import PreTrainedTokenizerBase
 from src.data.preprocessing import SlidingWindowProcessor
 
 logger = logging.getLogger(__name__)
+
+# Sentence boundary: period/question/exclamation followed by whitespace
+_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
 
 
 class DataCollatorForSummarization:
@@ -59,6 +64,7 @@ class DataCollatorForSummarization:
         max_windows: int = 32,
         max_summary_tokens: int = 512,
         label_pad_id: int = -100,
+        source_dropout: float = 0.0,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_kw = max_kw
@@ -69,6 +75,8 @@ class DataCollatorForSummarization:
         self.max_summary_tokens = max_summary_tokens
         self.label_pad_id = label_pad_id
         self.pad_id: int = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        self.source_dropout = source_dropout
+        self.training = True   # Toggle off during validation
 
         self._window_proc = SlidingWindowProcessor(
             window_size=window_size,
@@ -104,9 +112,14 @@ class DataCollatorForSummarization:
         max_num_windows = 0
 
         for item in batch:
+            # ── Optional sentence-level source dropout ──────────────────
+            text = item["text_clean"]
+            if self.training and self.source_dropout > 0:
+                text = self._apply_source_dropout(text)
+
             # ── Document → sliding windows ──────────────────────────────
             enc_doc = self.tokenizer(
-                item["text_clean"],
+                text,
                 add_special_tokens=True,
                 truncation=False,       # length handled by SlidingWindowProcessor
                 return_attention_mask=True,
@@ -242,3 +255,24 @@ class DataCollatorForSummarization:
         """Stack already-padded label lists into a tensor."""
         # All lists are padded to max_summary_tokens in _tokenise_summary
         return torch.tensor(all_labels, dtype=torch.long)
+
+    def _apply_source_dropout(self, text: str) -> str:
+        """Drop random sentences from source text to reduce extractive bias.
+
+        Splits text into sentences, randomly removes ``source_dropout``
+        fraction of them, and rejoins.  Always keeps at least 2 sentences
+        to preserve minimal context.
+        """
+        sentences = _SENT_SPLIT_RE.split(text)
+        if len(sentences) <= 2:
+            return text
+
+        n_drop = int(len(sentences) * self.source_dropout)
+        if n_drop == 0:
+            return text
+
+        # Never drop more than len-2 sentences (keep at least 2)
+        n_drop = min(n_drop, len(sentences) - 2)
+        drop_indices = set(random.sample(range(len(sentences)), n_drop))
+        kept = [s for i, s in enumerate(sentences) if i not in drop_indices]
+        return " ".join(kept)

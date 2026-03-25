@@ -109,6 +109,7 @@ class MISMTrainer:
             window_overlap=config.window_overlap,
             max_windows=config.max_windows,
             max_summary_tokens=config.max_summary_tokens,
+            source_dropout=getattr(config, "source_dropout", 0.0),
         )
         self.train_loader = self._build_dataloader(train_dataset, shuffle=True)
         self.val_loader   = (
@@ -278,6 +279,7 @@ class MISMTrainer:
         Dict of averaged training metrics for this epoch.
         """
         self.model.train()
+        self.collator.training = True
 
         # Set epoch on DistributedSampler so each rank shuffles differently
         if self.world_size > 1:
@@ -429,6 +431,7 @@ class MISMTrainer:
             return {}
 
         self.model.eval()
+        self.collator.training = False
         accum:    Dict[str, float] = defaultdict(float)
         n_batches = 0
 

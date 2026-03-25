@@ -62,6 +62,7 @@ class MISMConfig:
     label_smoothing:      float = 0.1
     gate_threshold_low:   float = 0.2
     gate_threshold_high:  float = 0.4
+    source_dropout:       float = 0.0
 
     # ── Data paths ────────────────────────────────────────────────────
     train_path:           str   = "dataset/splits/train.json"

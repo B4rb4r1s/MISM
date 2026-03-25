@@ -4,8 +4,8 @@ composite_loss.py — Composite loss for the Dual-Encoder Summarizer.
 Five components
 ---------------
 L_gen   (λ=0.50) : Cross-entropy with label smoothing.
-L_cover (λ=0.15) : Keyword coverage — MSE between time-averaged
-                   decoder→keyword attention and normalised target KW scores.
+L_cover (λ=0.15) : Keyword coverage — 1 minus mean max attention per keyword.
+                   Encourages each keyword to be strongly attended at least once.
 L_bert  (λ=0.10) : Soft BERTScore in T5 embedding space
                    (fully differentiable, no external model).
 L_gate  (λ=0.10) : Bilateral hinge loss on gate values.
@@ -66,68 +66,67 @@ class GenerativeLoss(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. Keyword coverage loss  (MSE between attention distribution and scores)
+# 2. Keyword coverage loss  (max-attention coverage)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class KeywordCoverageLoss(nn.Module):
-    """MSE between time-averaged decoder→keyword attention and target scores.
+    """Max-attention coverage loss for keywords.
 
-    The loss encourages the decoder to distribute attention over keywords in
-    proportion to their importance scores.
+    For each real keyword, compute the maximum attention weight it receives
+    across all valid decoder time-steps.  Loss = 1 − mean(max_attn).
+
+    Intuition: each keyword should be strongly attended at least once
+    during summary generation.  Unlike the previous MSE formulation, this
+    loss produces a non-zero gradient even when attention is uniform
+    (≈ 1/K), which solves the zero-init dead-gradient problem.
+
+    Value range: [0, 1−1/K].  Uniform attention → loss ≈ 0.95 (K=20).
+    Perfect coverage → loss → 0.
 
     Parameters
     ----------
-    ignore_index : int   — label pad value used to mask invalid decoder
-                   positions when averaging attention (default -100).
-    eps          : float — clamp for division stability (default 1e-8).
+    ignore_index : int — label pad value used to mask invalid decoder
+                   positions (default -100).
     """
 
     def __init__(
         self,
-        ignore_index: int   = -100,
-        eps:          float = 1e-8,
+        ignore_index: int = -100,
     ) -> None:
         super().__init__()
         self.ignore_index = ignore_index
-        self.eps = eps
 
     def forward(
         self,
         kw_attn_weights: torch.Tensor,          # [B, T, K]
-        kw_scores:       torch.Tensor,          # [B, K]
+        kw_scores:       torch.Tensor,          # [B, K]  (unused, API compat)
         kw_mask:         torch.Tensor,          # [B, K]  bool  True=real KW
         labels:          Optional[torch.Tensor] = None,  # [B, T]
     ) -> torch.Tensor:
         """
         Returns
         -------
-        Scalar MSE loss.
+        Scalar coverage loss in [0, 1].
         """
         B, T, K = kw_attn_weights.shape
 
-        # ── Token-level validity mask (exclude label-padding positions) ──
+        # ── Mask invalid decoder positions (set attention to 0) ─────
         if labels is not None:
-            tok_valid = (labels != self.ignore_index).float()   # [B, T]
+            tok_valid = (labels != self.ignore_index)              # [B, T]
+            attn = kw_attn_weights * tok_valid.unsqueeze(-1).float()
         else:
-            tok_valid = torch.ones(B, T, device=kw_attn_weights.device)
+            attn = kw_attn_weights
 
-        # ── Average attention over valid T positions ──────────────────
-        tok_exp  = tok_valid.unsqueeze(-1)                       # [B, T, 1]
-        sum_attn = (kw_attn_weights * tok_exp).sum(dim=1)       # [B, K]
-        count    = tok_exp.sum(dim=1).clamp(min=self.eps)        # [B, 1]
-        pred     = sum_attn / count                              # [B, K]
+        # ── Max attention per keyword across time steps ─────────────
+        max_attn = attn.max(dim=1).values                         # [B, K]
 
-        # ── Normalise target keyword scores ──────────────────────────
-        scores_m = kw_scores.masked_fill(~kw_mask, float("-inf"))  # [B, K]
-        target   = torch.softmax(scores_m, dim=-1)                 # [B, K]
-        target   = torch.nan_to_num(target, nan=0.0)               # all-pad guard
+        # ── Average over real keywords only ─────────────────────────
+        kw_float = kw_mask.float()                                 # [B, K]
+        n_real   = kw_float.sum(dim=1).clamp(min=1.0)             # [B]
+        mean_max = (max_attn * kw_float).sum(dim=1) / n_real      # [B]
 
-        # ── Mask padding keyword slots ────────────────────────────────
-        kw_float  = kw_mask.float()
-        pred_m    = pred   * kw_float
-        target_m  = target * kw_float
-
-        return F.mse_loss(pred_m, target_m, reduction="mean")
+        # ── Loss: 1 − mean_max (lower = better coverage) ───────────
+        return (1.0 - mean_max).mean()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
