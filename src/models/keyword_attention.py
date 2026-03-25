@@ -163,17 +163,13 @@ class KeywordAttentionLayer(nn.Module):
         raw_attn    = torch.nan_to_num(raw_attn,    nan=0.0)
         kw_attended = decoder_hidden + self.dropout(kw_attended)  # [B, T, D]  pure residual
 
-        # ── Score-weighted attention (optional, improves focus on top KW) ──
-        # Re-weight raw attention by kw_scores to amplify high-ranked KWs.
-        # scores: [B, K] → broadcast to [B, T, K]
-        kw_scores_masked = kw_scores.masked_fill(~kw_mask, 0.0)   # [B, K]
-        # Guard: NaN/Inf in kw_scores propagate into weighted_attn → NaN
-        kw_scores_masked = torch.nan_to_num(kw_scores_masked, nan=0.0, posinf=1.0, neginf=0.0)
-        score_weights = kw_scores_masked.unsqueeze(1).expand(B, T, K)  # [B, T, K]
-        # Multiply raw attention by score weights and re-normalise
-        weighted_attn = raw_attn * score_weights                   # [B, T, K]
-        attn_sum = weighted_attn.sum(dim=-1, keepdim=True).clamp(min=1e-9)
-        kw_attn_weights = weighted_attn / attn_sum                 # [B, T, K]
+        # ── kw_attn_weights for coverage loss = raw attention (unweighted) ──
+        # Previously, we score-weighted raw_attn by kw_scores here, which
+        # pre-baked the target distribution into the prediction, making
+        # coverage loss ≈ 0 (pred ∝ kw_scores ≈ target = softmax(kw_scores)).
+        # Now we return raw_attn directly so coverage loss gets a real signal:
+        # at init, pred = 1/K (uniform) vs target = softmax(kw_scores) → MSE > 0.
+        kw_attn_weights = raw_attn                                 # [B, T, K]
 
         # ── 2. Gated fusion ───────────────────────────────────────────
         gate_input = torch.cat([decoder_hidden, kw_attended], dim=-1)  # [B, T, 2D]
