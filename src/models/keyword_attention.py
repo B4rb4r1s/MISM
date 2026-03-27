@@ -69,10 +69,14 @@ class KeywordAttentionLayer(nn.Module):
         # ── Gated fusion ──────────────────────────────────────────────
         # gate ∈ (0, 1)^D per (batch, position, dim)
         self.gate_proj = nn.Linear(hidden_size * 2, hidden_size)
-        # Initialise gate bias to −2 so sigmoid(−2) ≈ 0.12 at start.
-        # This means enhanced ≈ 0.88 * decoder_hidden + 0.12 * kw_attended,
+        # Gate: zero-init weight + bias=−2 → sigmoid(0 + (−2)) ≈ 0.12
+        # uniformly across all positions.
+        # enhanced ≈ 0.88 * decoder_hidden + 0.12 * kw_attended,
         # preserving the pretrained decoder's fluency while KAL gradually
         # learns to inject keyword information.
+        # NOTE: weight MUST be zeros, otherwise gate output is random
+        # (depends on input) rather than the stable sigmoid(−2) ≈ 0.12.
+        nn.init.zeros_(self.gate_proj.weight)
         nn.init.constant_(self.gate_proj.bias, -2.0)
 
         # ── FFN ───────────────────────────────────────────────────────

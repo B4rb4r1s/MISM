@@ -108,8 +108,12 @@ class FusionLayer(nn.Module):
             last_linear = ffn[-1]
             nn.init.zeros_(last_linear.weight)
             nn.init.zeros_(last_linear.bias)
-        # Gate bias → −2  so  sigmoid(−2) ≈ 0.12: mostly pass-through of
-        # original doc_ctx, gradually learning to blend in KW information.
+        # Gate: zero-init weight + bias=−2 → sigmoid(0 + (−2)) ≈ 0.12
+        # uniformly across all positions. Mostly pass-through of original
+        # doc_ctx, gradually learning to blend in KW information.
+        # NOTE: weight MUST be zeros, otherwise gate output is random
+        # (depends on input) rather than the stable sigmoid(−2) ≈ 0.12.
+        nn.init.zeros_(self.gate_proj.weight)
         nn.init.constant_(self.gate_proj.bias, -2.0)
 
     # ------------------------------------------------------------------

@@ -56,6 +56,7 @@ from src.data.dataset import SummarizationDataset
 from src.models.dual_encoder_summarizer import DualEncoderSummarizer
 from src.training.checkpoint import load_checkpoint
 from src.training.config import load_config
+from src.utils.postprocess import clean_summary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,6 +139,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--no-repeat-ngram-size", type=int, default=4,
         help="Block repeated n-grams of this size (default: 4)",
+    )
+
+    # ── Post-processing ───────────────────────────────────────────
+    p.add_argument(
+        "--postprocess", action="store_true", default=False,
+        help="Apply post-processing pipeline to generated text "
+             "(trim fragments, fix language mixing, sentence boundaries)",
+    )
+    p.add_argument(
+        "--no-postprocess", action="store_true", default=False,
+        help="Explicitly disable post-processing (overrides --postprocess)",
     )
 
     return p.parse_args()
@@ -248,9 +260,17 @@ def main() -> None:
         )
 
         # Decode
-        gen_text = tokenizer.decode(
+        gen_text_raw = tokenizer.decode(
             gen_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=True,
         )
+
+        # Post-process if requested
+        use_pp = args.postprocess and not args.no_postprocess
+        if use_pp:
+            gen_text = clean_summary(gen_text_raw)
+        else:
+            gen_text = gen_text_raw
+
         ref_text = sample["summary"]
         src_text = sample["text_clean"]
         keywords = sample["keywords"]
@@ -269,6 +289,8 @@ def main() -> None:
             "reference": ref_text,
             "generated": gen_text,
         }
+        if use_pp:
+            record["generated_raw"] = gen_text_raw
         results.append(record)
 
         # Console preview

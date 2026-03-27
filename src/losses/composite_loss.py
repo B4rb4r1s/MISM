@@ -70,31 +70,37 @@ class GenerativeLoss(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class KeywordCoverageLoss(nn.Module):
-    """Max-attention coverage loss for keywords.
+    """Negative-log max-attention coverage loss for keywords.
 
     For each real keyword, compute the maximum attention weight it receives
-    across all valid decoder time-steps.  Loss = 1 − mean(max_attn).
+    across all valid decoder time-steps.  Loss = mean(−log(max_attn + ε)).
 
-    Intuition: each keyword should be strongly attended at least once
-    during summary generation.  Unlike the previous MSE formulation, this
-    loss produces a non-zero gradient even when attention is uniform
-    (≈ 1/K), which solves the zero-init dead-gradient problem.
+    Intuition: each keyword should be strongly attended at least once.
+    The −log formulation provides **adaptive gradient scaling**:
+      · gradient ∝ 1/max_attn  →  weak coverage gets STRONG push
+      · when max_attn ≈ 1/K (uniform), gradient ≈ K  (very strong)
+      · when max_attn ≈ 1.0 (perfect),  gradient ≈ 1  (minimal)
 
-    Value range: [0, 1−1/K].  Uniform attention → loss ≈ 0.95 (K=20).
-    Perfect coverage → loss → 0.
+    This is ~K× stronger than the previous `1 − mean(max)` formulation,
+    which had constant gradient 1/K regardless of coverage quality.
+
+    Value range: [0, log(K)].  Uniform → loss ≈ log(K).  Perfect → 0.
 
     Parameters
     ----------
     ignore_index : int — label pad value used to mask invalid decoder
                    positions (default -100).
+    eps          : float — epsilon for numerical stability in log.
     """
 
     def __init__(
         self,
         ignore_index: int = -100,
+        eps: float = 1e-8,
     ) -> None:
         super().__init__()
         self.ignore_index = ignore_index
+        self.eps = eps
 
     def forward(
         self,
@@ -106,7 +112,7 @@ class KeywordCoverageLoss(nn.Module):
         """
         Returns
         -------
-        Scalar coverage loss in [0, 1].
+        Scalar coverage loss ≥ 0.
         """
         B, T, K = kw_attn_weights.shape
 
@@ -120,13 +126,15 @@ class KeywordCoverageLoss(nn.Module):
         # ── Max attention per keyword across time steps ─────────────
         max_attn = attn.max(dim=1).values                         # [B, K]
 
+        # ── Negative log of max attention (per real keyword) ────────
+        neg_log = -torch.log(max_attn + self.eps)                  # [B, K]
+
         # ── Average over real keywords only ─────────────────────────
         kw_float = kw_mask.float()                                 # [B, K]
         n_real   = kw_float.sum(dim=1).clamp(min=1.0)             # [B]
-        mean_max = (max_attn * kw_float).sum(dim=1) / n_real      # [B]
+        mean_neg_log = (neg_log * kw_float).sum(dim=1) / n_real   # [B]
 
-        # ── Loss: 1 − mean_max (lower = better coverage) ───────────
-        return (1.0 - mean_max).mean()
+        return mean_neg_log.mean()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
