@@ -103,11 +103,20 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--n", type=int, default=15,
-        help="Number of samples to generate (default: 15)",
+        help="Number of samples to generate (default: 15, 0 = all)",
+    )
+    p.add_argument(
+        "--all", action="store_true", default=False,
+        help="Generate for ALL samples (overrides --n)",
     )
     p.add_argument(
         "--output", default="results/samples_480.json",
         help="Path for output JSON (default: results/samples_480.json)",
+    )
+    p.add_argument(
+        "--resume-from", default=None,
+        help="Path to partial results JSON to resume from "
+             "(already-generated doc_ids will be skipped)",
     )
     p.add_argument(
         "--max-length", type=int, default=256,
@@ -210,10 +219,31 @@ def main() -> None:
     ]
     logger.info("After filtering: %d usable records", len(records))
 
-    # ── Sample ────────────────────────────────────────────────────────
-    n = min(args.n, len(records))
-    sampled = random.sample(records, n)
-    logger.info("Selected %d samples (seed=%d)", n, args.seed)
+    # ── Sample or use all ────────────────────────────────────────────
+    if args.all:
+        sampled = records  # use all, in original order
+        n = len(sampled)
+        logger.info("Using ALL %d samples", n)
+    else:
+        n = min(args.n, len(records)) if args.n > 0 else len(records)
+        sampled = random.sample(records, n)
+        logger.info("Selected %d samples (seed=%d)", n, args.seed)
+
+    # ── Resume from partial results ─────────────────────────────────
+    done_ids: set = set()
+    resumed_results: List[dict] = []
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        if resume_path.exists():
+            with open(resume_path, "r", encoding="utf-8") as f:
+                resumed_results = json.load(f)
+            done_ids = {r["doc_id"] for r in resumed_results}
+            logger.info(
+                "Resumed from %s: %d already done, %d remaining",
+                resume_path, len(done_ids), n - len(done_ids),
+            )
+        else:
+            logger.warning("Resume file %s not found, starting fresh", resume_path)
 
     # ── Tokeniser ─────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
@@ -250,10 +280,19 @@ def main() -> None:
     logger.info("Model loaded and moved to %s", device)
 
     # ── Generate ──────────────────────────────────────────────────────
-    results: List[dict] = []
+    results: List[dict] = list(resumed_results)
     t0 = time.time()
+    generated_count = 0
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     for i, sample in enumerate(sampled):
+        doc_id = sample["doc_id"]
+
+        # Skip already-generated samples (resume mode)
+        if doc_id in done_ids:
+            continue
+
         # Collate single sample -> batch of 1
         batch = collator([sample])
         batch = {
@@ -311,6 +350,7 @@ def main() -> None:
         if use_pp:
             record["generated_raw"] = gen_text_raw
         results.append(record)
+        generated_count += 1
 
         # Console preview
         logger.info(
@@ -318,6 +358,13 @@ def main() -> None:
             i + 1, n, doc_id,
             len(src_text), len(ref_text), len(gen_text),
         )
+
+        # Auto-save every 10 samples (for resumability)
+        if generated_count % 10 == 0:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            logger.info("Auto-saved %d results to %s", len(results), output_path)
+
         if i < 3:
             print(f"\n{'='*80}")
             print(f"SAMPLE {i+1}  (doc_id={doc_id})")
