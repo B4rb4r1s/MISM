@@ -1,0 +1,72 @@
+# =============================================================================
+# Конфигурация: Qwen2.5-7B-Instruct + LoRA для реферирования научных статей
+# =============================================================================
+
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  max_seq_len: 8192
+  torch_dtype: "bfloat16"
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+data:
+  train_path: "dataset/dataset-SM-17k.json"
+  val_path: null                    # если null — отделяется от train_path
+  val_ratio: 0.1                    # доля валидации при автосплите
+  test_path: "dataset/dataset-480.json"
+  max_keywords: 20                  # макс. ключевых слов в промпте
+  min_keyword_score: 0.0            # мин. порог score для KW
+  min_summary_len: 50               # мин. длина реферата (символы)
+  summary_field: "auto"             # auto: summary или target-summary
+  system_prompt: >
+    Ты — система автоматического реферирования научных статей на русском языке.
+    Составь краткий реферат статьи объёмом около 100 слов,
+    опираясь на ключевые слова и полный текст.
+
+training:
+  output_dir: "checkpoints/qwen_lora"
+  epochs: 3
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 10
+  eval_strategy: "steps"
+  eval_steps: 500
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  dataloader_num_workers: 4
+  seed: 42
+  report_to: "tensorboard"
+  deepspeed: "configs/deepspeed_zero2.json"
+
+generation:
+  max_new_tokens: 300
+  min_new_tokens: 30
+  temperature: 0.3
+  top_p: 0.9
+  repetition_penalty: 1.15
+  do_sample: true
+  num_beams: 1

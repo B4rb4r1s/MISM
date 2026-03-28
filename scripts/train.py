@@ -1,264 +1,185 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-train.py — MISM training entry point.
+train.py — Обучение LLM-суммаризатора с LoRA.
 
-Single-GPU:
-    python scripts/train.py --config configs/gazeta_2stage.yaml
+Запуск (single GPU):
+    python scripts/train.py --config configs/qwen_lora.yaml
 
-Multi-GPU (8×V100, DDP via torchrun):
-    torchrun --nproc_per_node=8 scripts/train.py \
-        --config configs/gazeta_2stage.yaml
+Запуск (multi-GPU с DeepSpeed):
+    torchrun --nproc_per_node=6 scripts/train.py --config configs/qwen_lora.yaml
 
-Run only Stage 1:
-    torchrun --nproc_per_node=8 scripts/train.py \
-        --config configs/gazeta_2stage.yaml --stage 1
-
-Run only Stage 2 (load model from Stage 1 checkpoint):
-    torchrun --nproc_per_node=8 scripts/train.py \
-        --config configs/gazeta_2stage.yaml --stage 2 \
-        --resume checkpoints/gazeta_2stage/best.pt
-
-Resume interrupted training (restores optimizer + scheduler state):
-    torchrun --nproc_per_node=8 scripts/train.py \
-        --config configs/gazeta_2stage.yaml \
-        --resume checkpoints/gazeta_2stage/step_0005000.pt
-
-Override individual config values:
-    torchrun --nproc_per_node=8 scripts/train.py \
-        --config configs/gazeta_2stage.yaml \
-        --set batch_size=2 stage1_epochs=2
+Override параметров:
+    torchrun --nproc_per_node=6 scripts/train.py \
+        --config configs/qwen_lora.yaml \
+        --set training.learning_rate=1e-4 data.max_keywords=30 training.epochs=5
 """
-
-from __future__ import annotations
 
 import argparse
-import datetime
 import logging
 import os
 import sys
-from pathlib import Path
 
-import torch
+# Корень проекта
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# ── Ensure project root is on PYTHONPATH ──────────────────────────────────
-_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_ROOT))
+from transformers import TrainingArguments, Trainer
 
-from transformers import AutoTokenizer
-
-from src.data.dataset import SummarizationDataset
-from src.losses.composite_loss import CompositeLoss
-from src.models.dual_encoder_summarizer import DualEncoderSummarizer
 from src.training.config import load_config
-from src.training.trainer import MISMTrainer
+from src.models.lora_setup import load_tokenizer, load_model_for_training
+from src.data.dataset import (
+    SummarizationDataset,
+    DataCollatorWithPadding,
+    load_data,
+    train_val_split,
+)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
-    datefmt="%H:%M:%S",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("train")
+logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Argument parsing
-# ─────────────────────────────────────────────────────────────────────────────
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train MISM Dual-Encoder Summarizer")
-    p.add_argument(
-        "--config", required=True,
-        help="Path to YAML config file (e.g. configs/gazeta_2stage.yaml)",
-    )
-    p.add_argument(
-        "--resume", default=None,
-        help="Path to checkpoint (.pt) to resume from",
-    )
-    p.add_argument(
-        "--stage", type=int, default=0, choices=[0, 1, 2],
-        help="Run specific stage only: 1 or 2. Default 0 = both sequentially.",
-    )
-    p.add_argument(
-        "--set", nargs="*", default=[],
-        metavar="KEY=VALUE",
-        help="Override individual config values, e.g. --set batch_size=2 seed=1",
-    )
-    return p.parse_args()
-
-
-def _parse_overrides(pairs: list[str]) -> dict:
-    """Parse ['key=value', ...] into a dict with auto-typed values."""
-    overrides: dict = {}
-    for pair in pairs:
-        if "=" not in pair:
-            raise ValueError(f"Expected KEY=VALUE, got: {pair!r}")
-        key, raw_val = pair.split("=", 1)
-        key = key.strip()
-        raw_val = raw_val.strip()
-        # Auto-type: bool, int, float, str
-        if raw_val.lower() in ("true", "false"):
-            overrides[key] = raw_val.lower() == "true"
-        else:
-            try:
-                overrides[key] = int(raw_val)
-            except ValueError:
+def parse_overrides(args_list):
+    """Парсит --set key=value key2=value2 в словарь."""
+    overrides = {}
+    if not args_list:
+        return overrides
+    for item in args_list:
+        if "=" in item:
+            key, val = item.split("=", 1)
+            if val.lower() in ("true", "false"):
+                val = val.lower() == "true"
+            else:
                 try:
-                    overrides[key] = float(raw_val)
+                    val = int(val)
                 except ValueError:
-                    overrides[key] = raw_val  # keep as string
+                    try:
+                        val = float(val)
+                    except ValueError:
+                        pass
+            overrides[key] = val
     return overrides
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="Train LLM summarizer with LoRA")
+    parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument("--set", nargs="*", default=[], help="Override config: key=value")
+    parser.add_argument("--resume", default=None, help="Resume from checkpoint dir")
+    args = parser.parse_args()
 
-def main() -> None:
-    args = parse_args()
-
-    # ── DDP environment variables (set by torchrun) ───────────────────────
-    local_rank  = int(os.environ.get("LOCAL_RANK",  0))
-    world_size  = int(os.environ.get("WORLD_SIZE",  1))
-    rank        = int(os.environ.get("RANK",        0))
-
-    if world_size > 1:
-        torch.distributed.init_process_group(backend="nccl")
-
-    # ── Device ────────────────────────────────────────────────────────────
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
-        if world_size > 1:
-            logger.warning("DDP requested but CUDA not available — using CPU (debug only)")
-
-    # ── Config ────────────────────────────────────────────────────────────
-    overrides = _parse_overrides(args.set)
+    overrides = parse_overrides(args.set)
     cfg = load_config(args.config, overrides=overrides)
 
-    torch.manual_seed(cfg.seed + rank)
+    logger.info("=== Конфигурация ===")
+    logger.info("Модель: %s", cfg.model.name)
+    logger.info("LoRA r=%d, alpha=%d", cfg.lora.r, cfg.lora.alpha)
+    logger.info("Max seq len: %d", cfg.model.max_seq_len)
+    logger.info("Max keywords: %d", cfg.data.max_keywords)
+    logger.info("Epochs: %d, LR: %s", cfg.training.epochs, cfg.training.learning_rate)
 
-    # ── File logging (rank 0 only) ────────────────────────────────────────
-    if local_rank == 0:
-        _log_dir = Path(cfg.checkpoint_dir) / "logs"
-        _log_dir.mkdir(parents=True, exist_ok=True)
-        _ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        _log_path = _log_dir / f"train_{_ts}_rank{rank}.log"
-        _fh  = logging.FileHandler(_log_path, mode="w", encoding="utf-8")
-        _fh.setLevel(logging.DEBUG)
-        _fh.setFormatter(logging.Formatter(
-            "[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
-            datefmt="%H:%M:%S",
-        ))
-        logging.getLogger().addHandler(_fh)
-        logger.info("Log file: %s", _log_path)
+    # ── Токенизатор ──────────────────────────────────────────────
+    tokenizer = load_tokenizer(cfg)
 
-    if local_rank == 0:
-        logger.info("Config:\n%s", cfg)
+    # ── Данные ───────────────────────────────────────────────────
+    train_data = load_data(cfg.data.train_path)
 
-    # ── Tokeniser ─────────────────────────────────────────────────────────
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
-    # FRED-T5 uses a GPT2-style tokenizer that may lack a pad token.
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        logger.info("Set pad_token = eos_token (%s)", tokenizer.eos_token)
-
-    # ── Datasets ──────────────────────────────────────────────────────────
-    train_dataset = SummarizationDataset.from_json(cfg.train_path)
-    val_dataset   = SummarizationDataset.from_json(cfg.val_path)
-
-    if local_rank == 0:
-        logger.info("Train: %d samples | Val: %d samples",
-                    len(train_dataset), len(val_dataset))
-
-    # ── Model ─────────────────────────────────────────────────────────────
-    # Dimensions (hidden_size, num_heads, ffn_dim) are auto-inferred from
-    # the T5 backbone config — only non-architecture kwargs are passed.
-    model = DualEncoderSummarizer.from_pretrained(
-        cfg.model_name,
-        window_overlap=cfg.window_overlap,
-        max_src_len=cfg.max_src_len,
-        dropout=cfg.dropout,
-    )
-
-    if cfg.gradient_checkpointing:
-        # Enable gradient checkpointing ONLY on the T5 decoder stack.
-        # The T5 encoders are always frozen in GAZETA_2STAGE and receive
-        # integer token IDs (no requires_grad), so checkpointing them is
-        # wasteful and triggers "None of the inputs have requires_grad"
-        # warnings.  The decoder, however, receives encoder_hidden_states
-        # from the trainable FusionLayer, so gradients DO flow through it.
-        #
-        # use_reentrant=False is REQUIRED for compatibility with DDP
-        # find_unused_parameters=True.  Reentrant checkpointing triggers
-        # nested backward passes that fire DDP autograd hooks twice for
-        # the same parameter, causing "marked as ready twice" errors
-        # when the decoder is unfrozen (Stage 2).
-        model.decoder.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False},
+    if cfg.data.val_path:
+        val_data = load_data(cfg.data.val_path)
+    else:
+        train_data, val_data = train_val_split(
+            train_data, val_ratio=cfg.data.val_ratio, seed=cfg.training.seed,
         )
 
-    # ── Loss ──────────────────────────────────────────────────────────────
-    loss_fn = CompositeLoss(
-        lambda_gen=cfg.lambda_gen,
-        lambda_cover=cfg.lambda_cover,
-        lambda_bert=cfg.lambda_bert,
-        lambda_gate=cfg.lambda_gate,
-        lambda_kw=cfg.lambda_kw,
-        label_smoothing=cfg.label_smoothing,
-        gate_threshold_low=cfg.gate_threshold_low,
-        gate_threshold_high=cfg.gate_threshold_high,
-    )
-
-    # ── Trainer ───────────────────────────────────────────────────────────
-    trainer = MISMTrainer(
-        model=model,
-        config=cfg,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        loss_fn=loss_fn,
-        device=device,
+    train_dataset = SummarizationDataset(
+        data=train_data,
         tokenizer=tokenizer,
-        local_rank=local_rank,
-        world_size=world_size,
+        max_seq_len=cfg.model.max_seq_len,
+        max_keywords=cfg.data.max_keywords,
+        min_keyword_score=cfg.data.min_keyword_score,
+        min_summary_len=cfg.data.min_summary_len,
+        system_prompt=cfg.data.system_prompt,
+        summary_field=cfg.data.summary_field,
+        is_train=True,
     )
 
-    # ── Determine which stages to run ─────────────────────────────────────
-    stages = (1, 2) if args.stage == 0 else (args.stage,)
+    val_dataset = SummarizationDataset(
+        data=val_data,
+        tokenizer=tokenizer,
+        max_seq_len=cfg.model.max_seq_len,
+        max_keywords=cfg.data.max_keywords,
+        min_keyword_score=cfg.data.min_keyword_score,
+        min_summary_len=cfg.data.min_summary_len,
+        system_prompt=cfg.data.system_prompt,
+        summary_field=cfg.data.summary_field,
+        is_train=True,  # val тоже с labels для eval_loss
+    )
 
-    # ── Resume ────────────────────────────────────────────────────────────
-    if args.resume:
-        # When running a specific stage (--stage 2 --resume best.pt),
-        # load model weights only — optimizer and scheduler will be
-        # created fresh by setup_stage().
-        # When resuming the full pipeline (--stage 0), also restore
-        # optimizer + scheduler state for seamless continuation.
-        weights_only = (args.stage != 0)
-        meta = trainer.load(args.resume, weights_only=weights_only)
-        if weights_only:
-            logger.info(
-                "Loaded model weights from %s for Stage %d",
-                args.resume, args.stage,
-            )
-        else:
-            logger.info(
-                "Resumed from %s  (epoch=%d, step=%d, stage=%d)",
-                args.resume, meta["epoch"], meta["step"], meta["stage"],
-            )
+    data_collator = DataCollatorWithPadding(
+        pad_token_id=tokenizer.pad_token_id,
+        max_seq_len=cfg.model.max_seq_len,
+    )
 
-    # ── Train ─────────────────────────────────────────────────────────────
-    result = trainer.train(stages=stages)
+    logger.info("Train: %d samples, Val: %d samples", len(train_dataset), len(val_dataset))
 
-    if local_rank == 0:
-        logger.info(
-            "Training complete.  best_val_loss=%.4f  global_step=%d",
-            result["best_val_loss"],
-            result["global_step"],
-        )
+    # ── Модель ───────────────────────────────────────────────────
+    model = load_model_for_training(cfg)
 
-    if world_size > 1:
-        torch.distributed.destroy_process_group()
+    # ── Training Arguments ───────────────────────────────────────
+    training_args = TrainingArguments(
+        output_dir=cfg.training.output_dir,
+        num_train_epochs=cfg.training.epochs,
+        per_device_train_batch_size=cfg.training.per_device_batch_size,
+        per_device_eval_batch_size=cfg.training.per_device_batch_size,
+        gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
+        learning_rate=cfg.training.learning_rate,
+        lr_scheduler_type=cfg.training.lr_scheduler_type,
+        warmup_ratio=cfg.training.warmup_ratio,
+        weight_decay=cfg.training.weight_decay,
+        max_grad_norm=cfg.training.max_grad_norm,
+        bf16=cfg.training.bf16,
+        gradient_checkpointing=cfg.training.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        logging_steps=cfg.training.logging_steps,
+        eval_strategy=cfg.training.eval_strategy,
+        eval_steps=cfg.training.eval_steps,
+        save_strategy=cfg.training.save_strategy,
+        save_steps=cfg.training.save_steps,
+        save_total_limit=cfg.training.save_total_limit,
+        load_best_model_at_end=cfg.training.load_best_model_at_end,
+        metric_for_best_model=cfg.training.metric_for_best_model,
+        greater_is_better=cfg.training.greater_is_better,
+        dataloader_num_workers=cfg.training.dataloader_num_workers,
+        seed=cfg.training.seed,
+        report_to=cfg.training.report_to,
+        deepspeed=cfg.training.deepspeed,
+        remove_unused_columns=False,
+        dataloader_pin_memory=True,
+        logging_first_step=True,
+    )
+
+    # ── Trainer ──────────────────────────────────────────────────
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=data_collator,
+        tokenizer=tokenizer,
+    )
+
+    # ── Обучение ─────────────────────────────────────────────────
+    logger.info("=== Начало обучения ===")
+    trainer.train(resume_from_checkpoint=args.resume)
+
+    # ── Сохранение ───────────────────────────────────────────────
+    final_dir = os.path.join(cfg.training.output_dir, "final")
+    trainer.save_model(final_dir)
+    tokenizer.save_pretrained(final_dir)
+    logger.info("Модель сохранена в %s", final_dir)
+
+    logger.info("=== Обучение завершено ===")
 
 
 if __name__ == "__main__":
