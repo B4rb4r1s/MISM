@@ -79,6 +79,61 @@ def build_messages(
     return messages
 
 
+def truncate_text_to_fit(
+    tokenizer: Any,
+    text: str,
+    keywords_str: str,
+    system_prompt: str,
+    max_seq_len: int,
+    reserve_tokens: int = 100,
+) -> str:
+    """Обрезает текст статьи так, чтобы полный промпт влезал в max_seq_len.
+
+    Сначала измеряет длину «обёртки» (system prompt + keywords + ChatML теги),
+    затем обрезает текст, чтобы суммарно не превышать лимит.
+    reserve_tokens — запас под generation prompt и safety margin.
+
+    Возвращает текст (возможно обрезанный).
+    """
+    # Измеряем обёртку без текста статьи
+    shell_messages = build_messages("", keywords_str, system_prompt)
+    shell_text = tokenizer.apply_chat_template(
+        shell_messages, tokenize=False, add_generation_prompt=True,
+    )
+    shell_tokens = len(tokenizer.encode(shell_text, add_special_tokens=False))
+
+    # Сколько токенов доступно для текста статьи
+    available = max_seq_len - shell_tokens - reserve_tokens
+    if available <= 0:
+        logger.warning("Обёртка промпта (%d tok) превышает max_seq_len (%d)", shell_tokens, max_seq_len)
+        available = 512  # минимальный fallback
+
+    # Токенизируем текст и обрезаем если нужно
+    text_ids = tokenizer.encode(text, add_special_tokens=False)
+    if len(text_ids) <= available:
+        return text  # влезает целиком
+
+    # Обрезаем и декодируем обратно в строку
+    truncated_ids = text_ids[:available]
+    truncated_text = tokenizer.decode(truncated_ids, skip_special_tokens=True)
+
+    # Обрезаем до последнего полного предложения (точка, !, ?)
+    last_period = -1
+    for i in range(len(truncated_text) - 1, max(0, len(truncated_text) - 200), -1):
+        if truncated_text[i] in '.!?':
+            last_period = i
+            break
+
+    if last_period > len(truncated_text) * 0.8:  # не теряем больше 20%
+        truncated_text = truncated_text[: last_period + 1]
+
+    logger.debug(
+        "Текст обрезан: %d → %d токенов (доступно %d)",
+        len(text_ids), available, available,
+    )
+    return truncated_text
+
+
 class SummarizationDataset(Dataset):
     """Dataset для обучения LLM-суммаризатора.
 
@@ -90,7 +145,7 @@ class SummarizationDataset(Dataset):
         self,
         data: List[Dict[str, Any]],
         tokenizer: Any,
-        max_seq_len: int = 8192,
+        max_seq_len: int = 32768,
         max_keywords: int = 20,
         min_keyword_score: float = 0.0,
         min_summary_len: int = 50,
@@ -158,6 +213,21 @@ class SummarizationDataset(Dataset):
         summary: str,
     ) -> Dict[str, torch.Tensor]:
         """Кодирует пример для обучения с маскировкой промпта."""
+        # Оцениваем длину реферата, чтобы зарезервировать под него место
+        end_token = "<|im_end|>"
+        response_text = summary + end_token
+        response_ids = self.tokenizer.encode(response_text, add_special_tokens=False)
+
+        # Умная обрезка текста ДО токенизации полного промпта
+        text = truncate_text_to_fit(
+            tokenizer=self.tokenizer,
+            text=text,
+            keywords_str=keywords_str,
+            system_prompt=self.system_prompt,
+            max_seq_len=self.max_seq_len,
+            reserve_tokens=len(response_ids) + 50,
+        )
+
         # Токенизируем промпт (system + user + начало assistant)
         prompt_messages = build_messages(text, keywords_str, self.system_prompt)
         prompt_text = self.tokenizer.apply_chat_template(
@@ -165,27 +235,13 @@ class SummarizationDataset(Dataset):
         )
         prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=False)
 
-        # Токенизируем реферат + закрывающий токен
-        end_token = "<|im_end|>"
-        response_text = summary + end_token
-        response_ids = self.tokenizer.encode(response_text, add_special_tokens=False)
-
         input_ids = prompt_ids + response_ids
         labels = [-100] * len(prompt_ids) + response_ids
 
-        # Обрезка по max_seq_len: урезаем текст документа, не реферат
+        # Safety: жёсткая обрезка на случай если всё ещё не влезает
         if len(input_ids) > self.max_seq_len:
-            overflow = len(input_ids) - self.max_seq_len
-            text_ids = self.tokenizer.encode(text, add_special_tokens=False)
-            max_text_tokens = len(text_ids) - overflow - 64  # запас
-            if max_text_tokens > 0:
-                truncated_text = self.tokenizer.decode(
-                    text_ids[:max_text_tokens], skip_special_tokens=True,
-                )
-                return self._encode_train(truncated_text, keywords_str, summary)
-            else:
-                input_ids = input_ids[: self.max_seq_len]
-                labels = labels[: self.max_seq_len]
+            input_ids = input_ids[: self.max_seq_len]
+            labels = labels[: self.max_seq_len]
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
@@ -200,24 +256,21 @@ class SummarizationDataset(Dataset):
         doc_id: str,
     ) -> Dict[str, Any]:
         """Кодирует пример для инференса (только промпт)."""
+        # Умная обрезка текста ДО токенизации
+        text = truncate_text_to_fit(
+            tokenizer=self.tokenizer,
+            text=text,
+            keywords_str=keywords_str,
+            system_prompt=self.system_prompt,
+            max_seq_len=self.max_seq_len,
+            reserve_tokens=100,
+        )
+
         prompt_messages = build_messages(text, keywords_str, self.system_prompt)
         prompt_text = self.tokenizer.apply_chat_template(
             prompt_messages, tokenize=False, add_generation_prompt=True,
         )
         prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=False)
-
-        # Обрезка текста если промпт слишком длинный
-        if len(prompt_ids) > self.max_seq_len:
-            text_ids = self.tokenizer.encode(text, add_special_tokens=False)
-            overflow = len(prompt_ids) - self.max_seq_len
-            max_text_tokens = len(text_ids) - overflow - 64
-            if max_text_tokens > 0:
-                truncated_text = self.tokenizer.decode(
-                    text_ids[:max_text_tokens], skip_special_tokens=True,
-                )
-                return self._encode_inference(truncated_text, keywords_str, doc_id)
-
-            prompt_ids = prompt_ids[: self.max_seq_len]
 
         return {
             "input_ids": torch.tensor(prompt_ids, dtype=torch.long),
@@ -229,7 +282,7 @@ class SummarizationDataset(Dataset):
 class DataCollatorWithPadding:
     """Collator: паддит батч до макс. длины в батче (dynamic padding)."""
 
-    def __init__(self, pad_token_id: int, max_seq_len: int = 8192):
+    def __init__(self, pad_token_id: int, max_seq_len: int = 32768):
         self.pad_token_id = pad_token_id
         self.max_seq_len = max_seq_len
 

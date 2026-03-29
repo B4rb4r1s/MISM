@@ -42,6 +42,7 @@ from src.data.dataset import (
     _format_keywords,
     _detect_summary_field,
     build_messages,
+    truncate_text_to_fit,
     load_data,
 )
 
@@ -60,22 +61,32 @@ def generate_summary(
     keywords: list,
     system_prompt: str,
     max_keywords: int = 20,
-    max_seq_len: int = 8192,
+    max_seq_len: int = 32768,
     gen_kwargs: Optional[Dict] = None,
 ) -> str:
     """Генерирует реферат для одного документа."""
     keywords_str = _format_keywords(keywords, max_keywords, min_score=0.0)
-    messages = build_messages(text, keywords_str, system_prompt)
 
+    # Умная обрезка: обрезаем ТЕКСТ до токенизации, сохраняя целостность промпта
+    text = truncate_text_to_fit(
+        tokenizer=tokenizer,
+        text=text,
+        keywords_str=keywords_str,
+        system_prompt=system_prompt,
+        max_seq_len=max_seq_len,
+        reserve_tokens=100,
+    )
+
+    messages = build_messages(text, keywords_str, system_prompt)
     prompt_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True,
     )
 
+    # Токенизация без truncation — текст уже обрезан корректно
     inputs = tokenizer(
         prompt_text,
         return_tensors="pt",
-        truncation=True,
-        max_length=max_seq_len,
+        add_special_tokens=False,
     ).to(model.device)
 
     prompt_len = inputs["input_ids"].shape[1]

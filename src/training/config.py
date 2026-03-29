@@ -16,7 +16,7 @@ import yaml
 @dataclass
 class ModelConfig:
     name: str = "Qwen/Qwen2.5-7B-Instruct"
-    max_seq_len: int = 8192
+    max_seq_len: int = 32768
     torch_dtype: str = "bfloat16"
 
 
@@ -88,7 +88,7 @@ class TrainingConfig:
 
 @dataclass
 class GenerationConfig:
-    max_new_tokens: int = 300
+    max_new_tokens: int = 800
     min_new_tokens: int = 30
     temperature: float = 0.3
     top_p: float = 0.9

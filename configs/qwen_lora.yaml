@@ -4,7 +4,7 @@
 
 model:
   name: "Qwen/Qwen2.5-7B-Instruct"
-  max_seq_len: 8192
+  max_seq_len: 32768
   torch_dtype: "float32"             # V100: fp32 для стабильного инференса
 
 lora:
@@ -71,7 +71,7 @@ training:
   deepspeed: "configs/deepspeed_zero2.json"
 
 generation:
-  max_new_tokens: 400
+  max_new_tokens: 800
   min_new_tokens: 50
   temperature: 0.7                    # Ollama default — 0.7-0.8
   top_p: 0.9
