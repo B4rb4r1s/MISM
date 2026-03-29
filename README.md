@@ -1,59 +1,40 @@
-Запуск тестов
+
+Обучение (6x A100):
 ```bash
-pytest tests/test_phase2.py tests/test_phase3.py -v
+torchrun --nproc_per_node=6 scripts/train.py --config configs/qwen_lora.yaml
 ```
 
-Разбиение данные на выборки
+Override параметров на лету:
 ```bash
-# 1. Проверить качество удаления на 20 записях
-python scripts/verify_abstract_removal.py --input dataset/dataset-SM-17k.json --n 20
-
-# 2. Разбиение набора данных на обучающую, валидационную и тестовую выборки 80:10:10
-python scripts/prepare_data.py --input dataset/dataset-SM-17k.json --output dataset/splits --min_summary_len 100 --val_ratio 0.10 --test_ratio 0.10 --seed 42
+torchrun --nproc_per_node=6 scripts/train.py \
+    --config configs/qwen_lora.yaml \
+    --set data.max_keywords=30 training.epochs=5 training.learning_rate=1e-4
 ```
 
-Проверка на NaN
+Генерация на 480 статьях:
 ```bash
-python scripts/check_dataset.py --split dataset/splits/train.json
-python scripts/check_dataset.py --split dataset/splits/test.json
-python scripts/check_dataset.py --split dataset/splits/val.json
-# Сразу исправить
-python scripts/check_dataset.py --split dataset/splits/train.json --fix
+python scripts/generate.py \
+    --config configs/qwen_lora.yaml \
+    --adapter checkpoints/qwen_lora/final \
+    --data dataset/dataset-480.json \
+    --output results/summaries_480.json
 ```
 
-Запуск обучения (Phase 4, на вашем сервере)
+Интерактивный режим:
 ```bash
-# 8×V100, GAZETA_2STAGE
-torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml
-
-# Возобновить с чекпоинта
-torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml --resume checkpoints/gazeta_2stage/step_0005000.pt
-# Возобновить с чекпоинта со второго этапа
-torchrun --nproc_per_node=8 scripts/train.py --config configs/gazeta_2stage.yaml --stage 2 --resume checkpoints/gazeta_2stage/best.pt
+python scripts/generate.py \
+    --config configs/qwen_lora.yaml \
+    --adapter checkpoints/qwen_lora/final \
+    --interactive
 ```
 
-Tensorboard с прокинутым портом на `6006`
+Запуск zero-shot будет таким:
 ```bash
-tensorboard --logdir checkpoints/gazeta_2stage/logs/tensorboard --port=6006 --bind_al
-```
-
-Валидация на примераз из тестовой выборки
-```bash
-# Генерация 20 примеров из val-набора (можно запустить локально на GPU)
-python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 20
-
-# Или на CPU (медленнее, но без GPU)
-python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 5 --device cpu
-
-# Тест на 480 отдельных статьях
-python scripts/generate_samples_480.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --dataset dataset/dataset-480.json --n 15 --output results/samples_480.json
-```
-
-
-Диагностика неполадок
-```bash
-# Диагностический тест без KAL (на локальной машине с GPU)
-python scripts/generate_samples.py --config configs/gazeta_2stage.yaml --checkpoint checkpoints/gazeta_2stage/best.pt --split val --n 10 --seed 42 --bypass-kal
+python scripts/generate_zeroshot.py \
+    --config configs/qwen_lora.yaml \
+    --data dataset/dataset-480.json \
+    --n 20 \
+    --output results/zeroshot_480.json
 ```
 
 
