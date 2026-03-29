@@ -56,6 +56,27 @@ def _format_keywords(
     return ", ".join(parts)
 
 
+def trim_to_last_sentence(text: str) -> str:
+    """Обрезает текст до последнего полного предложения.
+
+    Если текст уже заканчивается на '.', '!' или '?' — возвращает как есть.
+    Иначе ищет последний такой символ и обрезает после него.
+    """
+    text = text.strip()
+    if not text:
+        return text
+    if text[-1] in ".!?":
+        return text
+
+    # Ищем последнюю точку/восклицательный/вопросительный
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] in ".!?":
+            return text[: i + 1]
+
+    # Не нашли ни одного — возвращаем как есть
+    return text
+
+
 def build_messages(
     text: str,
     keywords_str: str,

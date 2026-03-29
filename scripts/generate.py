@@ -43,6 +43,7 @@ from src.data.dataset import (
     _detect_summary_field,
     build_messages,
     truncate_text_to_fit,
+    trim_to_last_sentence,
     load_data,
 )
 
@@ -102,7 +103,7 @@ def generate_summary(
     generated_ids = outputs[0][prompt_len:]
     summary = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-    return summary.strip(), keywords_str, prompt_len
+    return trim_to_last_sentence(summary.strip()), keywords_str, prompt_len
 
 
 def process_batch(
