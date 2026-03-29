@@ -5,7 +5,7 @@
 model:
   name: "Qwen/Qwen2.5-7B-Instruct"
   max_seq_len: 8192
-  torch_dtype: "float16"             # V100 не поддерживает bfloat16
+  torch_dtype: "float32"             # V100: fp32 для стабильного инференса
 
 lora:
   r: 64
@@ -54,7 +54,7 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   bf16: false
-  fp16: true                          # V100: fp16 вместо bf16
+  fp16: false                          # V100: fp16 вместо bf16
   gradient_checkpointing: true
   logging_steps: 10
   eval_strategy: "steps"
@@ -71,10 +71,11 @@ training:
   deepspeed: "configs/deepspeed_zero2.json"
 
 generation:
-  max_new_tokens: 300
-  min_new_tokens: 30
-  temperature: 0.3
+  max_new_tokens: 400
+  min_new_tokens: 50
+  temperature: 0.7                    # Ollama default — 0.7-0.8
   top_p: 0.9
-  repetition_penalty: 1.15
+  top_k: 40                          # Ollama default
+  repetition_penalty: 1.1
   do_sample: true
   num_beams: 1

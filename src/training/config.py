@@ -92,7 +92,8 @@ class GenerationConfig:
     min_new_tokens: int = 30
     temperature: float = 0.3
     top_p: float = 0.9
-    repetition_penalty: float = 1.15
+    top_k: int = 40
+    repetition_penalty: float = 1.1
     do_sample: bool = True
     num_beams: int = 1
 

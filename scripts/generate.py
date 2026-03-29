@@ -78,6 +78,8 @@ def generate_summary(
         max_length=max_seq_len,
     ).to(model.device)
 
+    prompt_len = inputs["input_ids"].shape[1]
+
     gen_kwargs = gen_kwargs or {}
     outputs = model.generate(
         **inputs,
@@ -86,12 +88,10 @@ def generate_summary(
         eos_token_id=tokenizer.convert_tokens_to_ids("<|im_end|>"),
     )
 
-    # Декодируем только сгенерированную часть (без промпта)
-    prompt_len = inputs["input_ids"].shape[1]
     generated_ids = outputs[0][prompt_len:]
     summary = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-    return summary.strip()
+    return summary.strip(), keywords_str, prompt_len
 
 
 def process_batch(
@@ -110,6 +110,7 @@ def process_batch(
         "min_new_tokens": cfg.generation.min_new_tokens,
         "temperature": cfg.generation.temperature,
         "top_p": cfg.generation.top_p,
+        "top_k": cfg.generation.top_k,
         "repetition_penalty": cfg.generation.repetition_penalty,
         "do_sample": cfg.generation.do_sample,
         "num_beams": cfg.generation.num_beams,
@@ -129,7 +130,7 @@ def process_batch(
             logger.warning("Пропуск %s: пустой текст", doc_id)
             continue
 
-        generated = generate_summary(
+        generated, keywords_str, prompt_tokens = generate_summary(
             model=model,
             tokenizer=tokenizer,
             text=text,
@@ -144,13 +145,16 @@ def process_batch(
             "doc_id": doc_id,
             "generated_summary": generated,
             "reference_summary": reference,
+            "keywords_used": keywords_str,
+            "text_preview": text[:200].strip(),
             "text_length": len(text),
             "generated_length": len(generated),
-            "num_keywords": len(keywords),
+            "prompt_tokens": prompt_tokens,
+            "num_keywords": min(len(keywords), cfg.data.max_keywords),
         }
         results.append(result)
 
-        logger.info("--- %s ---", doc_id)
+        logger.info("--- %s (prompt: %d tok) ---", doc_id, prompt_tokens)
         logger.info("Сгенерировано [%d символов]: %s", len(generated), generated[:200])
         if reference:
             logger.info("Эталон [%d символов]: %s", len(reference), reference[:200])
@@ -165,6 +169,7 @@ def interactive_mode(model, tokenizer, cfg):
         "min_new_tokens": cfg.generation.min_new_tokens,
         "temperature": cfg.generation.temperature,
         "top_p": cfg.generation.top_p,
+        "top_k": cfg.generation.top_k,
         "repetition_penalty": cfg.generation.repetition_penalty,
         "do_sample": cfg.generation.do_sample,
         "num_beams": cfg.generation.num_beams,
@@ -195,7 +200,7 @@ def interactive_mode(model, tokenizer, cfg):
                 for kw in kw_input.split(","):
                     keywords.append({"surface_form": kw.strip(), "score": 1.0})
 
-            summary = generate_summary(
+            summary, _, prompt_tokens = generate_summary(
                 model=model,
                 tokenizer=tokenizer,
                 text=text,
@@ -206,7 +211,7 @@ def interactive_mode(model, tokenizer, cfg):
                 gen_kwargs=gen_kwargs,
             )
 
-            print(f"\n=== Реферат ({len(summary)} символов) ===")
+            print(f"\n=== Реферат ({len(summary)} символов, prompt: {prompt_tokens} токенов) ===")
             print(summary)
             print()
 

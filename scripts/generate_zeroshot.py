@@ -66,23 +66,25 @@ def generate_summary(model, tokenizer, text, keywords, cfg):
         max_length=cfg.model.max_seq_len,
     ).to(model.device)
 
+    prompt_len = inputs["input_ids"].shape[1]
+
     outputs = model.generate(
         **inputs,
         max_new_tokens=cfg.generation.max_new_tokens,
         min_new_tokens=cfg.generation.min_new_tokens,
         temperature=cfg.generation.temperature,
         top_p=cfg.generation.top_p,
+        top_k=cfg.generation.top_k,
         repetition_penalty=cfg.generation.repetition_penalty,
         do_sample=cfg.generation.do_sample,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.convert_tokens_to_ids("<|im_end|>"),
     )
 
-    prompt_len = inputs["input_ids"].shape[1]
     generated_ids = outputs[0][prompt_len:]
     summary = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-    return summary.strip()
+    return summary.strip(), keywords_str, prompt_len
 
 
 def main():
@@ -100,7 +102,7 @@ def main():
 
     # ── Загрузка базовой модели (без LoRA) ───────────────────────
     dtype = TORCH_DTYPE_MAP.get(cfg.model.torch_dtype, torch.bfloat16)
-    logger.info("Загрузка %s (zero-shot, без LoRA)...", cfg.model.name)
+    logger.info("Загрузка %s (zero-shot, dtype=%s)...", cfg.model.name, cfg.model.torch_dtype)
 
     tokenizer = AutoTokenizer.from_pretrained(
         cfg.model.name, trust_remote_code=True, padding_side="left",
@@ -136,18 +138,24 @@ def main():
         if not text or len(text.strip()) < 100:
             continue
 
-        generated = generate_summary(model, tokenizer, text, keywords, cfg)
+        generated, keywords_str, prompt_tokens = generate_summary(
+            model, tokenizer, text, keywords, cfg,
+        )
 
         result = {
             "doc_id": doc_id,
             "generated_summary": generated,
             "reference_summary": reference,
+            "keywords_used": keywords_str,
+            "text_preview": text[:200].strip(),
             "text_length": len(text),
             "generated_length": len(generated),
+            "prompt_tokens": prompt_tokens,
+            "num_keywords": min(len(keywords), cfg.data.max_keywords),
         }
         results.append(result)
 
-        logger.info("--- %s ---", doc_id)
+        logger.info("--- %s (prompt: %d tok) ---", doc_id, prompt_tokens)
         logger.info("Сгенерировано [%d сим.]: %s", len(generated), generated[:200])
 
     # ── Сохранение ───────────────────────────────────────────────
