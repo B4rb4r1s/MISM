@@ -68,7 +68,7 @@ training:
   dataloader_num_workers: 4
   seed: 42
   report_to: "tensorboard"
-  deepspeed: "configs/deepspeed_zero2.json"
+  # deepspeed: "configs/deepspeed_zero2.json"  # отключён: нет CUDA Toolkit на сервере
 
 generation:
   max_new_tokens: 800

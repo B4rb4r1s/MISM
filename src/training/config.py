@@ -83,7 +83,7 @@ class TrainingConfig:
     dataloader_num_workers: int = 4
     seed: int = 42
     report_to: str = "tensorboard"
-    deepspeed: Optional[str] = "configs/deepspeed_zero2.json"
+    deepspeed: Optional[str] = None
 
 
 @dataclass

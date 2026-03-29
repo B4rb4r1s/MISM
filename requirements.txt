@@ -9,7 +9,7 @@ datasets>=2.14.0
 sentencepiece>=0.2.0
 
 # Training
-deepspeed>=0.14.0
+# deepspeed>=0.14.0          # опционально: требует CUDA Toolkit
 tensorboard>=2.14.0
 wandb>=0.16.0
 
