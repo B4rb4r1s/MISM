@@ -32,6 +32,32 @@ TORCH_DTYPE_MAP = {
 }
 
 
+def _detect_attn_implementation() -> str:
+    """Определяет лучшую реализацию attention для текущего оборудования.
+
+    Flash Attention 2 требует Ampere+ (A100, A10G, RTX 30xx/40xx).
+    V100 и старше используют sdpa (PyTorch native) или eager.
+    """
+    try:
+        import flash_attn  # noqa: F401
+        if torch.cuda.is_available():
+            capability = torch.cuda.get_device_capability()
+            if capability[0] >= 8:  # Ampere+
+                logger.info("Attention: flash_attention_2 (GPU capability %d.%d)", *capability)
+                return "flash_attention_2"
+        logger.info("Flash Attention установлен, но GPU не поддерживает (capability %s)", capability)
+    except ImportError:
+        pass
+
+    # sdpa — PyTorch 2.0+ native scaled dot product attention
+    if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        logger.info("Attention: sdpa (PyTorch native)")
+        return "sdpa"
+
+    logger.info("Attention: eager (fallback)")
+    return "eager"
+
+
 def load_tokenizer(cfg: Config) -> AutoTokenizer:
     """Загружает токенизатор и настраивает pad_token."""
     tokenizer = AutoTokenizer.from_pretrained(
@@ -62,7 +88,7 @@ def load_base_model(
         pretrained_model_name_or_path=cfg.model.name,
         torch_dtype=dtype,
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        attn_implementation=_detect_attn_implementation(),
     )
 
     if quantize_4bit:
@@ -139,7 +165,7 @@ def load_model_for_inference(
         torch_dtype=dtype,
         trust_remote_code=True,
         device_map="auto",
-        attn_implementation="flash_attention_2",
+        attn_implementation=_detect_attn_implementation(),
     )
 
     model = PeftModel.from_pretrained(base_model, adapter_path)

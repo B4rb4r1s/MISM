@@ -139,6 +139,7 @@ def main():
         weight_decay=cfg.training.weight_decay,
         max_grad_norm=cfg.training.max_grad_norm,
         bf16=cfg.training.bf16,
+        fp16=cfg.training.fp16,
         gradient_checkpointing=cfg.training.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=cfg.training.logging_steps,

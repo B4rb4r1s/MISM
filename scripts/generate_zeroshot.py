@@ -26,6 +26,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 from src.training.config import load_config
+from src.models.lora_setup import _detect_attn_implementation
 from src.data.dataset import (
     _format_keywords,
     _detect_summary_field,
@@ -112,7 +113,7 @@ def main():
         torch_dtype=dtype,
         trust_remote_code=True,
         device_map="auto",
-        attn_implementation="flash_attention_2",
+        attn_implementation=_detect_attn_implementation(),
     )
     model.eval()
     logger.info("Модель загружена, device: %s", next(model.parameters()).device)

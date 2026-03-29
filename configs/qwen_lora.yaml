@@ -5,7 +5,7 @@
 model:
   name: "Qwen/Qwen2.5-7B-Instruct"
   max_seq_len: 8192
-  torch_dtype: "bfloat16"
+  torch_dtype: "float16"             # V100 не поддерживает bfloat16
 
 lora:
   r: 64
@@ -46,7 +46,8 @@ training:
   warmup_ratio: 0.05
   weight_decay: 0.01
   max_grad_norm: 1.0
-  bf16: true
+  bf16: false
+  fp16: true                          # V100: fp16 вместо bf16
   gradient_checkpointing: true
   logging_steps: 10
   eval_strategy: "steps"

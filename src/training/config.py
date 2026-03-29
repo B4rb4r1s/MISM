@@ -62,6 +62,7 @@ class TrainingConfig:
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     bf16: bool = True
+    fp16: bool = False
     gradient_checkpointing: bool = True
     logging_steps: int = 10
     eval_strategy: str = "steps"
